@@ -1,0 +1,814 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"math"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Block struct {
+	ID              string `json:"id"`
+	DateKey         string `json:"dateKey"`
+	StartSlot       int    `json:"startSlot"`
+	TotalHours      int    `json:"totalHours"`
+	BlockSize       int    `json:"blockSize"`
+	ShiftName       string `json:"shiftName"`
+	StartTime       string `json:"startTime"`
+	EndTime         string `json:"endTime"`
+	WorkType        string `json:"workType"`
+	OwnerID         string `json:"ownerId,omitempty"`
+	MaxHoursPerUser int    `json:"maxHoursPerUser,omitempty"`
+}
+
+type Booking struct {
+	ID      string `json:"id"`
+	UserID  string `json:"userId"`
+	DateKey string `json:"dateKey"`
+	BlockID string `json:"blockId"`
+	Hours   int    `json:"hours"`
+}
+
+type BlockResponse struct {
+	Block
+	Label          string          `json:"label"`
+	EndSlot        int             `json:"endSlot"`
+	ReservedHours  int             `json:"reservedHours"`
+	RemainingHours int             `json:"remainingHours"`
+	IsFull         bool            `json:"isFull"`
+	MyHours        int             `json:"myHours"`
+	Bookings       []BookingStatus `json:"bookings"`
+}
+
+type BookingStatus struct {
+	Booking
+	IsMine bool   `json:"isMine"`
+	Status string `json:"status"`
+}
+
+type Summary struct {
+	ReleasedHours  int `json:"releasedHours"`
+	ReservedHours  int `json:"reservedHours"`
+	RemainingHours int `json:"remainingHours"`
+}
+
+type Store struct {
+	mu            sync.Mutex
+	releaseBlocks map[string][]Block
+	bookings      []Booking
+	projects      map[string][]string // Projects per admin: { adminId: [projectNames...] }
+	nextBlockID   int
+	nextBookingID int
+}
+
+var store = &Store{
+	releaseBlocks: make(map[string][]Block),
+	bookings:      make([]Booking, 0),
+	projects:      make(map[string][]string),
+	nextBlockID:   100,
+	nextBookingID: 100,
+}
+
+const dayStartHour = 8
+const slotsPerDay = 24
+const maxHoursPerDay = 8
+
+func writeJSON(w http.ResponseWriter, code int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func withCORS(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		fn(w, r)
+	}
+}
+
+func parseDateKey(value string) (time.Time, error) {
+	return time.Parse("2006-01-02", value)
+}
+
+func slotEndDateTime(dateKey string, slotIndex int) time.Time {
+	base, err := parseDateKey(dateKey)
+	if err != nil {
+		return time.Time{}
+	}
+	endHourAbsolute := dayStartHour + slotIndex + 1
+	dayOffset := endHourAbsolute / 24
+	hourOfDay := endHourAbsolute % 24
+	return time.Date(base.Year(), base.Month(), base.Day()+dayOffset, hourOfDay, 0, 0, 0, time.Local)
+}
+
+func deriveBookingStatus(dateKey string, slotIndex int) string {
+	now := time.Now()
+	if slotEndDateTime(dateKey, slotIndex).Before(now) || slotEndDateTime(dateKey, slotIndex).Equal(now) {
+		return "completed"
+	}
+	return "reserved"
+}
+
+func blockEndSlot(block Block) int {
+	return block.StartSlot + int(math.Max(1, math.Ceil(float64(block.TotalHours)))) - 1
+}
+
+func buildDateRange(startDate time.Time, count int) []string {
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		d := startDate.AddDate(0, 0, i)
+		out = append(out, d.Format("2006-01-02"))
+	}
+	return out
+}
+
+func startOfWeek(date time.Time) time.Time {
+	d := date.Truncate(24 * time.Hour)
+	offset := int(d.Weekday())
+	return d.AddDate(0, 0, -offset)
+}
+
+func buildWeekRange(date time.Time) []string {
+	return buildDateRange(startOfWeek(date), 7)
+}
+
+func buildBlocks(totalHours int, blockSize int, startSlot int) []Block {
+	blocks := make([]Block, 0)
+	remaining := totalHours
+	cursor := startSlot
+	for remaining > 0 {
+		hours := remaining
+		if hours > blockSize {
+			hours = blockSize
+		}
+		blocks = append(blocks, Block{
+			StartSlot:  cursor,
+			TotalHours: hours,
+			BlockSize:  blockSize,
+		})
+		remaining -= hours
+		cursor += int(math.Ceil(float64(hours)))
+	}
+	return blocks
+}
+
+func getBlockBookings(blockID string) []Booking {
+	bookings := make([]Booking, 0)
+	for _, booking := range store.bookings {
+		if booking.BlockID == blockID {
+			bookings = append(bookings, booking)
+		}
+	}
+	return bookings
+}
+
+func reservedForBlock(blockID string) int {
+	sum := 0
+	for _, booking := range getBlockBookings(blockID) {
+		sum += booking.Hours
+	}
+	return sum
+}
+
+func remainingForBlock(block Block) int {
+	return int(math.Max(0, float64(block.TotalHours-reservedForBlock(block.ID))))
+}
+
+func blockWorkType(dateKey, blockID string) string {
+	for _, block := range store.releaseBlocks[dateKey] {
+		if block.ID == blockID {
+			return block.WorkType
+		}
+	}
+	return ""
+}
+
+func userHoursForDayAndWorkType(dateKey, userID, workType, excludeBookingID string) int {
+	sum := 0
+	for _, booking := range store.bookings {
+		if booking.DateKey != dateKey || booking.UserID != userID || booking.ID == excludeBookingID {
+			continue
+		}
+		if blockWorkType(dateKey, booking.BlockID) == workType {
+			sum += booking.Hours
+		}
+	}
+	return sum
+}
+
+func serializeBlock(block Block, currentUserID string) BlockResponse {
+	blockBookings := getBlockBookings(block.ID)
+	reservedHours := 0
+	myHours := 0
+	bookingsResp := make([]BookingStatus, 0, len(blockBookings))
+	for _, booking := range blockBookings {
+		reservedHours += booking.Hours
+		if booking.UserID == currentUserID {
+			myHours += booking.Hours
+		}
+		bookingsResp = append(bookingsResp, BookingStatus{
+			Booking: booking,
+			IsMine:  booking.UserID == currentUserID,
+			Status:  deriveBookingStatus(booking.DateKey, blockEndSlot(block)),
+		})
+	}
+	remainingHours := int(math.Max(0, float64(block.TotalHours-reservedHours)))
+	return BlockResponse{
+		Block:          block,
+		Label:          fmt.Sprintf("%02d:00 start", (dayStartHour+block.StartSlot)%24),
+		EndSlot:        blockEndSlot(block),
+		ReservedHours:  reservedHours,
+		RemainingHours: remainingHours,
+		IsFull:         remainingHours <= 0,
+		MyHours:        myHours,
+		Bookings:       bookingsResp,
+	}
+}
+
+func summarizeDate(dateKey string) Summary {
+	blocks := store.releaseBlocks[dateKey]
+	releasedHours := 0
+	reservedHours := 0
+	for _, block := range blocks {
+		releasedHours += block.TotalHours
+		reservedHours += reservedForBlock(block.ID)
+	}
+	return Summary{
+		ReleasedHours:  releasedHours,
+		ReservedHours:  reservedHours,
+		RemainingHours: int(math.Max(0, float64(releasedHours-reservedHours))),
+	}
+}
+
+func handleWeekRange(w http.ResponseWriter, r *http.Request) {
+	anchorDate := r.URL.Query().Get("anchorDate")
+	if anchorDate == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "anchorDate is required"})
+		return
+	}
+	parsed, err := parseDateKey(anchorDate)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid anchorDate format"})
+		return
+	}
+	writeJSON(w, http.StatusOK, buildWeekRange(parsed))
+}
+
+func handleWeekSchedule(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		DateKeys      []string `json:"dateKeys"`
+		UserID        string   `json:"userId"`
+		IsAdmin       bool     `json:"isAdmin"`
+		UserWorkTypes []string `json:"userWorkTypes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+
+	response := map[string]struct {
+		Blocks  []BlockResponse `json:"blocks"`
+		Summary Summary         `json:"summary"`
+	}{}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	for _, dateKey := range payload.DateKeys {
+		blocks := make([]BlockResponse, 0)
+		for _, block := range store.releaseBlocks[dateKey] {
+			serialized := serializeBlock(block, payload.UserID)
+			// If caller is admin, only show blocks owned by that admin.
+			if payload.IsAdmin {
+				if block.OwnerID == payload.UserID {
+					blocks = append(blocks, serialized)
+				}
+				continue
+			}
+			if payload.UserWorkTypes == nil {
+				blocks = append(blocks, serialized)
+				continue
+			}
+			for _, workType := range payload.UserWorkTypes {
+				if workType == block.WorkType {
+					blocks = append(blocks, serialized)
+					break
+				}
+			}
+		}
+		releasedHours := 0
+		reservedHours := 0
+		for _, block := range blocks {
+			releasedHours += block.TotalHours
+			reservedHours += block.ReservedHours
+		}
+		response[dateKey] = struct {
+			Blocks  []BlockResponse `json:"blocks"`
+			Summary Summary         `json:"summary"`
+		}{
+			Blocks: blocks,
+			Summary: Summary{
+				ReleasedHours:  releasedHours,
+				ReservedHours:  reservedHours,
+				RemainingHours: int(math.Max(0, float64(releasedHours-reservedHours))),
+			},
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func handleUserHours(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	dateKey := query.Get("dateKey")
+	userID := query.Get("userId")
+	workType := query.Get("workType")
+	result := 0
+	store.mu.Lock()
+	result = userHoursForDayAndWorkType(dateKey, userID, workType, "")
+	store.mu.Unlock()
+	writeJSON(w, http.StatusOK, result)
+}
+
+func handleUserHoursSummary(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		DateKeys []string `json:"dateKeys"`
+		UserID   string   `json:"userId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	dateSet := make(map[string]struct{}, len(payload.DateKeys))
+	for _, k := range payload.DateKeys {
+		dateSet[k] = struct{}{}
+	}
+	reportedHours := 0
+	reservedHours := 0
+	store.mu.Lock()
+	for _, booking := range store.bookings {
+		if booking.UserID != payload.UserID {
+			continue
+		}
+		if _, ok := dateSet[booking.DateKey]; !ok {
+			continue
+		}
+		block := Block{}
+		for _, candidate := range store.releaseBlocks[booking.DateKey] {
+			if candidate.ID == booking.BlockID {
+				block = candidate
+				break
+			}
+		}
+		endSlot := blockEndSlot(block)
+		reservedHours += booking.Hours
+		if deriveBookingStatus(booking.DateKey, endSlot) == "completed" {
+			reportedHours += booking.Hours
+		}
+	}
+	store.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]int{"reportedHours": reportedHours, "reservedHours": reservedHours})
+}
+
+func summarizeDateForOwner(dateKey, ownerID string) Summary {
+	blocks := store.releaseBlocks[dateKey]
+	releasedHours := 0
+	reservedHours := 0
+	for _, block := range blocks {
+		// When ownerID is provided, only count this admin's own blocks.
+		if ownerID != "" && block.OwnerID != ownerID {
+			continue
+		}
+		releasedHours += block.TotalHours
+		reservedHours += reservedForBlock(block.ID)
+	}
+	return Summary{
+		ReleasedHours:  releasedHours,
+		ReservedHours:  reservedHours,
+		RemainingHours: int(math.Max(0, float64(releasedHours-reservedHours))),
+	}
+}
+
+func handleAdminCapacitySummary(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		DateKeys []string `json:"dateKeys"`
+		OwnerID  string   `json:"ownerId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	response := make(map[string]Summary)
+	store.mu.Lock()
+	for _, dateKey := range payload.DateKeys {
+		response[dateKey] = summarizeDateForOwner(dateKey, payload.OwnerID)
+	}
+	store.mu.Unlock()
+	writeJSON(w, http.StatusOK, response)
+}
+
+func handleReleaseHours(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		DateKey         string `json:"dateKey"`
+		TotalHours      int    `json:"totalHours"`
+		BlockSize       int    `json:"blockSize"`
+		StartSlot       int    `json:"startSlot"`
+		ShiftName       string `json:"shiftName"`
+		StartTime       string `json:"startTime"`
+		EndTime         string `json:"endTime"`
+		WorkType        string `json:"workType"`
+		OwnerID         string `json:"ownerId"`
+		MaxHoursPerUser int    `json:"maxHoursPerUser"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if payload.TotalHours < 1 {
+		payload.TotalHours = 1
+	}
+	if payload.BlockSize < 1 {
+		payload.BlockSize = 1
+	}
+	created := addRelease(payload.DateKey, payload.TotalHours, payload.BlockSize, payload.StartSlot, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, payload.OwnerID, payload.MaxHoursPerUser)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": created})
+}
+
+func addRelease(dateKey string, totalHours, blockSize, startSlot int, shiftName, startTime, endTime, workType, ownerId string, maxHoursPerUser int) []Block {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	current := store.releaseBlocks[dateKey]
+	blocks := buildBlocks(totalHours, blockSize, startSlot)
+	created := make([]Block, 0, len(blocks))
+	for _, block := range blocks {
+		store.nextBlockID++
+		block.ID = fmt.Sprintf("rb-%d", store.nextBlockID)
+		block.DateKey = dateKey
+		block.ShiftName = shiftName
+		block.StartTime = startTime
+		block.EndTime = endTime
+		block.WorkType = workType
+		block.OwnerID = ownerId
+		if maxHoursPerUser > 0 {
+			block.MaxHoursPerUser = maxHoursPerUser
+		}
+		created = append(created, block)
+	}
+	store.releaseBlocks[dateKey] = append(current, created...)
+	return created
+}
+
+func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		DateKey         string `json:"dateKey"`
+		BlockID         string `json:"blockId"`
+		TotalHours      int    `json:"totalHours"`
+		ShiftName       string `json:"shiftName"`
+		StartTime       string `json:"startTime"`
+		EndTime         string `json:"endTime"`
+		WorkType        string `json:"workType"`
+		MaxHoursPerUser int    `json:"maxHoursPerUser"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	current := store.releaseBlocks[payload.DateKey]
+	var updatedBlock *Block
+	reserved := 0
+	for i, block := range current {
+		if block.ID != payload.BlockID {
+			continue
+		}
+		reserved = reservedForBlock(block.ID)
+		normalizedTotal := payload.TotalHours
+		if normalizedTotal < 1 {
+			normalizedTotal = 1
+		}
+		if normalizedTotal < reserved {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't reduce below %dh — that's already claimed on this block.", reserved)})
+			return
+		}
+		current[i].TotalHours = normalizedTotal
+		current[i].BlockSize = normalizedTotal
+		if payload.ShiftName != "" {
+			current[i].ShiftName = payload.ShiftName
+		}
+		if payload.StartTime != "" {
+			current[i].StartTime = payload.StartTime
+		}
+		if payload.EndTime != "" {
+			current[i].EndTime = payload.EndTime
+		}
+		if payload.WorkType != "" {
+			current[i].WorkType = payload.WorkType
+		}
+		if payload.MaxHoursPerUser > 0 {
+			current[i].MaxHoursPerUser = payload.MaxHoursPerUser
+		}
+		updatedBlock = &current[i]
+		break
+	}
+	store.releaseBlocks[payload.DateKey] = current
+	if updatedBlock == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Block not found."})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": updatedBlock})
+}
+
+func handleRevokeBlock(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		DateKey string `json:"dateKey"`
+		BlockID string `json:"blockId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if reservedForBlock(payload.BlockID) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "This block already has reservations."})
+		return
+	}
+	current := store.releaseBlocks[payload.DateKey]
+	next := make([]Block, 0, len(current))
+	for _, block := range current {
+		if block.ID == payload.BlockID {
+			continue
+		}
+		next = append(next, block)
+	}
+	store.releaseBlocks[payload.DateKey] = next
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func handleReserveHours(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		DateKey        string `json:"dateKey"`
+		BlockID        string `json:"blockId"`
+		Hours          int    `json:"hours"`
+		UserID         string `json:"userId"`
+		MaxHoursPerDay int    `json:"maxHoursPerDay"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if payload.Hours < 1 {
+		payload.Hours = 1
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	block := Block{}
+	for _, candidate := range store.releaseBlocks[payload.DateKey] {
+		if candidate.ID == payload.BlockID {
+			block = candidate
+			break
+		}
+	}
+	if block.ID == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Block not found."})
+		return
+	}
+	remainingHours := remainingForBlock(block)
+	if payload.Hours > remainingHours {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Only %dh remain in this block.", remainingHours)})
+		return
+	}
+	// enforce per-project daily max: prefer block.MaxHoursPerUser if set, otherwise use payload.MaxHoursPerDay
+	perUserMax := payload.MaxHoursPerDay
+	if block.MaxHoursPerUser > 0 {
+		perUserMax = block.MaxHoursPerUser
+	}
+	existingForUser := userHoursForDayAndWorkType(payload.DateKey, payload.UserID, block.WorkType, "")
+	if existingForUser+payload.Hours > perUserMax {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("That would put you at %dh of %s today; the max is %dh/day per project.", existingForUser+payload.Hours, block.WorkType, perUserMax)})
+		return
+	}
+	store.nextBookingID++
+	created := Booking{
+		ID:      fmt.Sprintf("b-%d", store.nextBookingID),
+		UserID:  payload.UserID,
+		DateKey: payload.DateKey,
+		BlockID: payload.BlockID,
+		Hours:   payload.Hours,
+	}
+	store.bookings = append(store.bookings, created)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": created})
+}
+
+func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		BookingID      string `json:"bookingId"`
+		Hours          int    `json:"hours"`
+		UserID         string `json:"userId"`
+		MaxHoursPerDay int    `json:"maxHoursPerDay"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var target *Booking
+	for i := range store.bookings {
+		if store.bookings[i].ID == payload.BookingID {
+			target = &store.bookings[i]
+			break
+		}
+	}
+	if target == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Booking not found."})
+		return
+	}
+	if target.UserID != payload.UserID {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Not your booking."})
+		return
+	}
+	if payload.Hours < 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Hours must be 0 or more."})
+		return
+	}
+	if payload.Hours == 0 {
+		original := *target
+		next := make([]Booking, 0, len(store.bookings)-1)
+		for _, booking := range store.bookings {
+			if booking.ID == payload.BookingID {
+				continue
+			}
+			next = append(next, booking)
+		}
+		store.bookings = next
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true, "booking": original})
+		return
+	}
+	block := Block{}
+	for _, candidate := range store.releaseBlocks[target.DateKey] {
+		if candidate.ID == target.BlockID {
+			block = candidate
+			break
+		}
+	}
+	otherBookingsOnBlock := 0
+	for _, booking := range store.bookings {
+		if booking.DateKey == target.DateKey && booking.BlockID == target.BlockID && booking.ID != payload.BookingID {
+			otherBookingsOnBlock += booking.Hours
+		}
+	}
+	otherUserHours := userHoursForDayAndWorkType(target.DateKey, payload.UserID, block.WorkType, payload.BookingID)
+	// respect block-level per-user max if present
+	perUserMax := payload.MaxHoursPerDay
+	if block.MaxHoursPerUser > 0 {
+		perUserMax = block.MaxHoursPerUser
+	}
+	blockCapacityRemaining := int(math.Max(0, float64(block.TotalHours-otherBookingsOnBlock)))
+	dailyCapacityRemaining := int(math.Max(0, float64(perUserMax-otherUserHours)))
+	maxAllowed := blockCapacityRemaining
+	if dailyCapacityRemaining < maxAllowed {
+		maxAllowed = dailyCapacityRemaining
+	}
+	if payload.Hours > maxAllowed {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Only %dh are available for this booking.", maxAllowed)})
+		return
+	}
+	if payload.Hours == target.Hours {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": false, "booking": *target})
+		return
+	}
+	target.Hours = payload.Hours
+	updated := *target
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": true, "booking": updated})
+}
+
+func handleCancelBooking(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		BookingID string `json:"bookingId"`
+		UserID    string `json:"userId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	idx := -1
+	for i, booking := range store.bookings {
+		if booking.ID == payload.BookingID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Booking not found."})
+		return
+	}
+	target := store.bookings[idx]
+	if target.UserID != payload.UserID {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Not your booking."})
+		return
+	}
+	block := Block{}
+	for _, candidate := range store.releaseBlocks[target.DateKey] {
+		if candidate.ID == target.BlockID {
+			block = candidate
+			break
+		}
+	}
+	if deriveBookingStatus(target.DateKey, blockEndSlot(block)) == "completed" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Can't cancel a shift that already happened."})
+		return
+	}
+	store.bookings = append(store.bookings[:idx], store.bookings[idx+1:]...)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// GET /api/projects?adminId=xxx returns projects for that admin
+func handleGetProjects(w http.ResponseWriter, r *http.Request) {
+	adminId := r.URL.Query().Get("adminId")
+	if adminId == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "adminId required"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	projects := store.projects[adminId]
+	if projects == nil {
+		projects = []string{}
+	}
+	writeJSON(w, http.StatusOK, projects)
+}
+
+// POST /api/projects adds a new project for the admin
+func handleAddProject(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AdminId string `json:"adminId"`
+		Name    string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if req.AdminId == "" || name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "adminId and name required"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	// Check if project already exists for this admin. Compared
+	// case-insensitively so "hubdoc" and "Hubdoc" are treated as the same
+	// project rather than silently creating a duplicate; the existing entry's
+	// original casing is kept since blocks already reference that string.
+	projects := store.projects[req.AdminId]
+	for _, p := range projects {
+		if strings.EqualFold(p, name) {
+			writeJSON(w, http.StatusOK, projects)
+			return
+		}
+	}
+	store.projects[req.AdminId] = append(projects, name)
+	writeJSON(w, http.StatusOK, store.projects[req.AdminId])
+}
+
+// Router for projects endpoint - dispatches GET/POST
+func handleProjectsRouter(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		handleGetProjects(w, r)
+	} else if r.Method == http.MethodPost {
+		handleAddProject(w, r)
+	} else {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
+	}
+}
+
+func main() {
+	http.HandleFunc("/api/week-range", withCORS(handleWeekRange))
+	http.HandleFunc("/api/week-schedule", withCORS(handleWeekSchedule))
+	http.HandleFunc("/api/user-hours", withCORS(handleUserHours))
+	http.HandleFunc("/api/user-hours-summary", withCORS(handleUserHoursSummary))
+	http.HandleFunc("/api/admin-capacity-summary", withCORS(handleAdminCapacitySummary))
+	http.HandleFunc("/api/release-hours", withCORS(handleReleaseHours))
+	http.HandleFunc("/api/adjust-released-hours", withCORS(handleAdjustReleasedHours))
+	http.HandleFunc("/api/revoke-block", withCORS(handleRevokeBlock))
+	http.HandleFunc("/api/reserve-hours", withCORS(handleReserveHours))
+	http.HandleFunc("/api/update-booking-hours", withCORS(handleUpdateBookingHours))
+	http.HandleFunc("/api/cancel-booking", withCORS(handleCancelBooking))
+	http.HandleFunc("/api/projects", withCORS(handleProjectsRouter))
+
+	addr := ":8080"
+	log.Printf("Go backend listening on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
+}
