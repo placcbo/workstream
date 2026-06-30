@@ -114,12 +114,13 @@
   text-align: center;
 }
 
-.reserved-timer-status {
-  text-align: center;
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 1rem;
-  line-height: 1.6;
-  margin-bottom: 8px;
+.reserved-timer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
 }
 
 .reserved-timer-action {
@@ -135,20 +136,10 @@
   margin-top: 0;
 }
 
-.reserved-timer-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.reserved-timer-summary--footer {
+.reserved-timer-summary--header {
   text-align: right;
   color: rgba(255, 255, 255, 0.78);
   font-size: 0.8rem;
-  margin-top: 0;
   white-space: nowrap;
 }
 
@@ -159,8 +150,8 @@
 }
 
 .reserved-timer-avatar {
-  width: 54px;
-  height: 54px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.2);
   color: #fff;
@@ -175,10 +166,30 @@
   object-fit: cover;
 }
 
+.reserved-timer-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .reserved-timer-name {
   font-size: 1rem;
   font-weight: 700;
   color: #fff;
+}
+
+.reserved-timer-status-chip {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.14);
+  padding: 3px 9px;
+  border-radius: 999px;
+}
+
+.reserved-timer-status-chip--live {
+  color: #fff;
+  background: rgba(20, 24, 30, 0.28);
 }
 
 .reserved-timer-email {

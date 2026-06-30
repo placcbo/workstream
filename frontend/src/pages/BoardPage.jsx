@@ -764,16 +764,7 @@ export default function BoardPage() {
             <div className="reserved-blocks-panel" onClick={(event) => event.stopPropagation()}>
               <div className="reserved-blocks-modal-grid">
                 <div className="reserved-timer-card">
-                  <div className="reserved-timer-clock">{formatSeconds(timerElapsedSeconds)}</div>
-                  <div className="reserved-timer-status">{timerStatusText}</div>
-                  {timerRunning && (
-                    <div className="reserved-timer-action reserved-timer-action--stop">
-                      <button className="btn btn--ghost reserved-timer-button" onClick={handleStopWorking}>
-                        Stop timer
-                      </button>
-                    </div>
-                  )}
-                  <div className="reserved-timer-footer">
+                  <div className="reserved-timer-header">
                     <div className="reserved-timer-user">
                       {user?.avatarUrl ? (
                         <img src={user.avatarUrl} alt="User avatar" className="reserved-timer-avatar reserved-timer-avatar--img" />
@@ -781,14 +772,27 @@ export default function BoardPage() {
                         <span className="reserved-timer-avatar">{userInitials}</span>
                       )}
                       <div>
-                        <div className="reserved-timer-name">{user?.name ?? "Work user"}</div>
+                        <div className="reserved-timer-name-row">
+                          <span className="reserved-timer-name">{user?.name ?? "Work user"}</span>
+                          <span className={`reserved-timer-status-chip ${timerRunning ? "reserved-timer-status-chip--live" : ""}`}>
+                            {timerStatusText}
+                          </span>
+                        </div>
                         <div className="reserved-timer-email">{user?.email ?? "No email"}</div>
                       </div>
                     </div>
-                    <div className="reserved-timer-summary reserved-timer-summary--footer">
+                    <div className="reserved-timer-summary reserved-timer-summary--header">
                       Reported: {effectiveReportedHours.toFixed(2)}h
                     </div>
                   </div>
+                  <div className="reserved-timer-clock">{formatSeconds(timerElapsedSeconds)}</div>
+                  {timerRunning && (
+                    <div className="reserved-timer-action reserved-timer-action--stop">
+                      <button className="btn btn--ghost reserved-timer-button" onClick={handleStopWorking}>
+                        Stop timer
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div className={`reserved-blocks-right ${timerRunning ? "reserved-blocks-right--tracking" : ""}`}>
                   <div className="reserved-blocks-titlebar">
