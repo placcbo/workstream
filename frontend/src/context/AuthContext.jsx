@@ -111,7 +111,7 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [authLoading, setAuthLoading] = useState(true); // restoring session on first load
+  const [authLoading, setAuthLoading] = useState(false);
   // { [workType]: string[] of normalized emails granted EXTRA access to that workType }
   // Always fetched fresh from the backend — never cached in localStorage.
   const [workTypeAccess, setWorkTypeAccess] = useState({});

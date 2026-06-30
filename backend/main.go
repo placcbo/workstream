@@ -8,10 +8,13 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type Block struct {
@@ -116,7 +119,7 @@ var store = &Store{
 // later), we don't trust the elapsed time as real tracked work.
 const maxPlausibleTimerHours = 12
 
-const defaultAdminInviteCode = "workstream-admin-2026"
+var defaultAdminInviteCode = "workstream-admin-2026"
 
 const dayStartHour = 8
 const slotsPerDay = 24
@@ -1570,6 +1573,13 @@ func handleSessionRouter(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("No .env file loaded: %v", err)
+	}
+	if envCode := strings.TrimSpace(os.Getenv("ADMIN_INVITE_CODE")); envCode != "" {
+		defaultAdminInviteCode = envCode
+	}
+
 	http.HandleFunc("/api/week-range", withCORS(handleWeekRange))
 	http.HandleFunc("/api/week-schedule", withCORS(handleWeekSchedule))
 	http.HandleFunc("/api/user-hours", withCORS(handleUserHours))
