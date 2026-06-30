@@ -1023,7 +1023,7 @@ func handleGetTimer(w http.ResponseWriter, r *http.Request) {
 	}
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
 	if elapsedSeconds > maxPlausibleTimerHours*3600 {
-		addedHours := math.Round(maxPlausibleTimerHours*10) / 10
+		addedHours := math.Round(maxPlausibleTimerHours*100) / 100
 		// Bank elapsed hours for every stopped/auto-stopped timer, including
 		// ones tied to a specific booking — partial work should be reported
 		// immediately rather than waiting for the whole shift to complete.
@@ -1099,7 +1099,7 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 	}
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
 	cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
-	addedHours := math.Round((cappedSeconds/3600)*10) / 10
+	addedHours := math.Round((cappedSeconds/3600)*100) / 100
 	// Bank elapsed hours immediately, even for booking-tied timers — partial
 	// work should show up in reported hours right away rather than waiting
 	// for the whole shift to complete. See handleUserHoursSummary for how

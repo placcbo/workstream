@@ -249,6 +249,24 @@
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* Step 1: badge ticks down live while this block's timer is running —
+   a soft pink pulse cues that the number is moving, not stale. */
+.reserved-block-card-duration--live {
+  color: #ffd9ec;
+  background: rgba(236, 72, 153, 0.18);
+  box-shadow: 0 0 0 1px rgba(236, 72, 153, 0.35) inset;
+  animation: reserved-duration-pulse 2s ease-in-out infinite;
+}
+
+@keyframes reserved-duration-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
 .reserved-block-card-start {
   padding: 8px 14px;
   border-radius: 999px;
@@ -315,6 +333,25 @@
   font-weight: 700;
   color: #eef2f8;
   margin-bottom: 8px;
+}
+
+.reserved-block-card-progress-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.reserved-block-card-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.35);
+  transition: width 0.3s ease;
+}
+
+.reserved-block-card-progress-fill--live {
+  background: linear-gradient(90deg, #ec4899, #f9a8d4);
 }
 
 .reserved-block-details {

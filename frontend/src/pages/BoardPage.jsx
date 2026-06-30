@@ -773,7 +773,7 @@ export default function BoardPage() {
                       </button>
                     </div>
                   )}
-                  <div className="reserved-timer-summary">Total reported hours: {effectiveReportedHours.toFixed(1)}h</div>
+                  <div className="reserved-timer-summary">Total reported hours: {effectiveReportedHours.toFixed(2)}h</div>
                   <div className="reserved-timer-footer">
                     <div className="reserved-timer-user">
                       {user?.avatarUrl ? (
@@ -815,8 +815,15 @@ export default function BoardPage() {
                         const isCurrentTask = timerRunning && timerBookingId != null && timerBookingId === blockBookingId;
                         const expired = isShiftExpired(block.dateKey, block.endTime, block.startTime);
                         const workedHours = blockBookingId != null ? (bookingBanked[blockBookingId] ?? 0) : 0;
-                        const remainingHours = Math.max(0, block.myHours - workedHours);
+                        // While this exact block is the one being actively tracked, fold the
+                        // live stopwatch into the "worked so far" figure so the badge ticks
+                        // down in real time instead of sitting frozen until the timer stops.
+                        const liveWorkedHours = isCurrentTask ? workedHours + timerElapsedSeconds / 3600 : workedHours;
+                        const remainingHours = Math.max(0, block.myHours - liveWorkedHours);
                         const hasPriorWork = workedHours > 0;
+                        const progressPct = block.myHours > 0
+                          ? Math.min(100, Math.max(0, (liveWorkedHours / block.myHours) * 100))
+                          : 0;
                         return (
                         <div key={block.id} className="reserved-block-card reserved-block-card--task">
                         <div className="reserved-block-card-title-row">
@@ -825,7 +832,7 @@ export default function BoardPage() {
                             <div className="reserved-block-card-title">{block.shiftName || block.workType || "Shift"}</div>
                           </div>
                           <div className="reserved-block-card-meta">
-                            <span className="reserved-block-card-duration">{remainingHours.toFixed(1)}h</span>
+                            <span className={`reserved-block-card-duration ${isCurrentTask ? "reserved-block-card-duration--live" : ""}`}>{remainingHours.toFixed(2)}h</span>
                             <button
                               className={
                                 `btn btn--ghost reserved-block-card-start ${
@@ -876,6 +883,12 @@ export default function BoardPage() {
                               {isCurrentTask ? "Stop timer" : expired ? "Expired" : hasPriorWork ? "Resume" : "Start timer"}
                             </button>
                           </div>
+                        </div>
+                        <div className="reserved-block-card-progress-track">
+                          <div
+                            className={`reserved-block-card-progress-fill ${isCurrentTask ? "reserved-block-card-progress-fill--live" : ""}`}
+                            style={{ width: `${progressPct}%` }}
+                          />
                         </div>
                         <div className="reserved-block-details">
                           between {block.dateKey} {block.startTime} to {block.endTime}
