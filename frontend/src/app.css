@@ -1025,6 +1025,102 @@
   font-weight: 700;
   font-size: 0.88rem;
 }
+.arp-release-row {
+  margin-top: 14px;
+}
+
+/* Recurrence */
+.arp-recurrence {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+}
+.arp-recurrence-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--paper);
+  cursor: pointer;
+  user-select: none;
+}
+.arp-recurrence-toggle input {
+  accent-color: var(--amber);
+  width: 15px;
+  height: 15px;
+}
+.arp-recurrence-body {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.arp-recurrence-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+.arp-recurrence-hint {
+  font-size: 0.72rem;
+  color: var(--paper-dim);
+  opacity: 0.75;
+  margin: 0;
+}
+.arp-recurrence-hint--warn {
+  color: var(--rust);
+  opacity: 1;
+}
+.arp-recurrence-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.arp-preset-chip {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--paper-dim);
+  cursor: pointer;
+  transition: border-color 0.14s, color 0.14s, background 0.14s;
+}
+.arp-preset-chip:hover {
+  border-color: var(--amber);
+  color: var(--paper);
+}
+.arp-preset-chip--active {
+  border-color: var(--amber);
+  background: rgba(232, 163, 61, 0.14);
+  color: var(--amber);
+}
+.arp-recurrence-weekdays {
+  display: flex;
+  gap: 6px;
+}
+.arp-weekday-chip {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--paper-dim);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: border-color 0.14s, color 0.14s, background 0.14s;
+}
+.arp-weekday-chip:hover {
+  border-color: var(--amber);
+  color: var(--paper);
+}
+.arp-weekday-chip--active {
+  border-color: var(--amber);
+  background: rgba(232, 163, 61, 0.14);
+  color: var(--amber);
+}
 
 /* Project badge (status section) */
 .arp-project-badge {

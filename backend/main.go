@@ -538,6 +538,28 @@ func addRelease(dateKey string, totalHours, blockSize, startSlot int, shiftName,
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	current := store.releaseBlocks[dateKey]
+
+	// If a block already exists on this date for the same project, owner,
+	// and shift window, top up its hours instead of stacking a brand-new
+	// block alongside it. Without this, re-clicking "Release" (or a
+	// recurring release whose pattern happens to land on a date that
+	// already has a manual release) creates several skinny side-by-side
+	// blocks for what the admin sees as "one release" — they fight for the
+	// same column width and the labels overlap/truncate.
+	for i := range current {
+		existing := &current[i]
+		if existing.WorkType == workType && existing.OwnerID == ownerId &&
+			existing.StartTime == startTime && existing.EndTime == endTime {
+			existing.TotalHours += totalHours
+			existing.BlockSize = existing.TotalHours
+			if maxHoursPerUser > 0 {
+				existing.MaxHoursPerUser = maxHoursPerUser
+			}
+			store.releaseBlocks[dateKey] = current
+			return []Block{*existing}
+		}
+	}
+
 	blocks := buildBlocks(totalHours, blockSize, startSlot)
 	created := make([]Block, 0, len(blocks))
 	for _, block := range blocks {
@@ -556,6 +578,146 @@ func addRelease(dateKey string, totalHours, blockSize, startSlot int, shiftName,
 	}
 	store.releaseBlocks[dateKey] = append(current, created...)
 	return created
+}
+
+// recurringDateKeys computes the list of work-day dateKeys (YYYY-MM-DD) a
+// recurring release should land on, given a frequency, an inclusive
+// [startDate, endDate] range, and (for daily/weekly) the set of weekdays to
+// include. Weekday values follow Go's time.Weekday: Sunday=0 ... Saturday=6.
+//
+//   - "daily"/"weekly": walk every calendar day in the range and keep the
+//     ones whose weekday is in `weekdays`. This single mechanism covers both
+//     "every day" (all 7 selected) and "just Mondays" (1 selected) — the
+//     distinction between the two frequency labels is purely about how the
+//     admin thinks about the pattern, not a different algorithm. An empty
+//     `weekdays` set falls back to every day, so the frequency still does
+//     something sensible even if the picker was left untouched.
+//   - "monthly": start on `startDate` and step forward one calendar month at
+//     a time (so the 31st rolls correctly via time.AddDate) until past
+//     `endDate`.
+func recurringDateKeys(startDate, endDate time.Time, frequency string, weekdays map[int]bool) []string {
+	keys := make([]string, 0)
+	if endDate.Before(startDate) {
+		return keys
+	}
+	if frequency == "monthly" {
+		for cursor := startDate; !cursor.After(endDate); cursor = cursor.AddDate(0, 1, 0) {
+			keys = append(keys, cursor.Format("2006-01-02"))
+		}
+		return keys
+	}
+	includeAll := len(weekdays) == 0
+	for cursor := startDate; !cursor.After(endDate); cursor = cursor.AddDate(0, 0, 1) {
+		if includeAll || weekdays[int(cursor.Weekday())] {
+			keys = append(keys, cursor.Format("2006-01-02"))
+		}
+	}
+	return keys
+}
+
+func handleReleaseHoursRecurring(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		StartDate       string `json:"startDate"`
+		EndDate         string `json:"endDate"`
+		Frequency       string `json:"frequency"` // "daily" | "weekly" | "monthly"
+		Weekdays        []int  `json:"weekdays"`  // 0=Sun..6=Sat, used for daily/weekly
+		TotalHours      int    `json:"totalHours"`
+		ShiftName       string `json:"shiftName"`
+		StartTime       string `json:"startTime"`
+		EndTime         string `json:"endTime"`
+		WorkType        string `json:"workType"`
+		OwnerID         string `json:"ownerId"`
+		MaxHoursPerUser int    `json:"maxHoursPerUser"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	startDate, err := time.Parse("2006-01-02", payload.StartDate)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Invalid start date."})
+		return
+	}
+	endDate, err := time.Parse("2006-01-02", payload.EndDate)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Invalid end date."})
+		return
+	}
+	if endDate.Before(startDate) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "End date must be on or after the start date."})
+		return
+	}
+	if payload.Frequency != "daily" && payload.Frequency != "weekly" && payload.Frequency != "monthly" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Frequency must be daily, weekly, or monthly."})
+		return
+	}
+	if payload.Frequency != "monthly" && len(payload.Weekdays) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Pick at least one day of the week."})
+		return
+	}
+	if payload.TotalHours < 1 {
+		payload.TotalHours = 1
+	}
+
+	weekdaySet := make(map[int]bool, len(payload.Weekdays))
+	for _, d := range payload.Weekdays {
+		if d >= 0 && d <= 6 {
+			weekdaySet[d] = true
+		}
+	}
+	dateKeys := recurringDateKeys(startDate, endDate, payload.Frequency, weekdaySet)
+	// Cap how far a single recurring release can fan out so a typo in the
+	// end date (e.g. a stray extra year) can't silently create thousands of
+	// blocks.
+	const maxOccurrences = 366
+	if len(dateKeys) > maxOccurrences {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("That pattern would create %d releases — narrow the date range (max %d).", len(dateKeys), maxOccurrences)})
+		return
+	}
+	if len(dateKeys) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "No matching days fall inside that date range."})
+		return
+	}
+
+	// TotalHours is the size of the whole pool the admin is releasing over
+	// the recurring period (e.g. "500h total, released weekly"), NOT the
+	// amount released on every single occurrence — otherwise a 50h release
+	// repeating weekly for a month would silently hand out 200h+. Split it
+	// evenly across the matching dates, with any remainder (from hours not
+	// dividing evenly) spread across the first few dates so the total adds
+	// up exactly.
+	occurrences := len(dateKeys)
+	if payload.TotalHours < occurrences {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    false,
+			"error": fmt.Sprintf("%dh isn't enough to spread across %d releases (1h minimum each) — raise the total or shorten the range.", payload.TotalHours, occurrences),
+		})
+		return
+	}
+	baseHoursPerDate := payload.TotalHours / occurrences
+	remainder := payload.TotalHours % occurrences
+
+	createdByDate := make(map[string][]Block, len(dateKeys))
+	totalBlocksCreated := 0
+	for i, dateKey := range dateKeys {
+		hoursForDate := baseHoursPerDate
+		if i < remainder {
+			hoursForDate++
+		}
+		created := addRelease(dateKey, hoursForDate, hoursForDate, 0, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, payload.OwnerID, payload.MaxHoursPerUser)
+		createdByDate[dateKey] = created
+		totalBlocksCreated += len(created)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                 true,
+		"createdByDate":      createdByDate,
+		"datesCount":         len(dateKeys),
+		"totalBlocksCreated": totalBlocksCreated,
+		"hoursPerDate":       baseHoursPerDate,
+		"dateKeys":           dateKeys,
+
+	})
 }
 
 func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
@@ -1291,6 +1453,7 @@ func main() {
 	http.HandleFunc("/api/user-hours-summary", withCORS(handleUserHoursSummary))
 	http.HandleFunc("/api/admin-capacity-summary", withCORS(handleAdminCapacitySummary))
 	http.HandleFunc("/api/release-hours", withCORS(handleReleaseHours))
+	http.HandleFunc("/api/release-hours-recurring", withCORS(handleReleaseHoursRecurring))
 	http.HandleFunc("/api/adjust-released-hours", withCORS(handleAdjustReleasedHours))
 	http.HandleFunc("/api/revoke-block", withCORS(handleRevokeBlock))
 	http.HandleFunc("/api/reserve-hours", withCORS(handleReserveHours))

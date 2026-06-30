@@ -8,6 +8,7 @@ import {
   fetchWeekSchedule,
   adjustReleasedHours,
   releaseHours,
+  releaseHoursRecurring,
   reserveHours,
   revokeBlock,
   updateBookingHours,
@@ -616,7 +617,11 @@ export default function BoardPage() {
         });
         return;
       }
-      if (block.isFull) return;
+      if (block.isFull) {
+        pushToast("warning", "This block is fully claimed — no hours left to reserve.");
+        loadWeek(anchorDate);
+        return;
+      }
       const blockMaxHours = block.maxHoursPerUser ?? MAX_HOURS_PER_DAY;
       const maxHours = Math.min(block.remainingHours, blockMaxHours - committedForProject);
       if (maxHours <= 0) {
@@ -634,7 +639,7 @@ export default function BoardPage() {
         maxHoursPerUser: block.maxHoursPerUser ?? MAX_HOURS_PER_DAY,
       });
     },
-    [isAdmin, user?.id, timerRunning, activeTrackedBlock, pushToast, bookingBanked]
+    [isAdmin, user?.id, timerRunning, activeTrackedBlock, pushToast, bookingBanked, loadWeek, anchorDate]
   );
 
   const handlePendingHoursChange = useCallback((hours) => {
@@ -672,7 +677,16 @@ export default function BoardPage() {
             );
       setSubmitting(false);
       if (!res.ok) {
-        setBanner({ kind: "error", text: res.error });
+        // The hours this modal was built from may now be stale (someone
+        // else claimed the remaining capacity while it was open) — leaving
+        // the modal up just invites another failed retry against the same
+        // stale numbers. Close it, surface the reason via a toast (banners
+        // render behind the modal overlay and are easy to miss), and pull
+        // fresh data so the block's true remaining hours show up.
+        pushToast("error", res.error || "That request couldn't be completed.");
+        setPendingClaim(null);
+        setCancelConfirmOpen(false);
+        loadWeek(new Date(pendingClaim.dateKey));
         return;
       }
     } catch (err) {
@@ -694,7 +708,7 @@ export default function BoardPage() {
     });
     setPendingClaim(null);
     loadWeek(new Date(pendingClaim.dateKey));
-  }, [loadWeek, pendingClaim, user?.id]);
+  }, [loadWeek, pendingClaim, user?.id, pushToast]);
 
   const handleClearPending = useCallback(() => {
     setPendingClaim(null);
@@ -823,11 +837,41 @@ export default function BoardPage() {
   }, []);
 
   const handleRelease = useCallback(
-    async ({ dateKey, totalHours, shiftName, startTime, endTime, workType, maxHoursPerUser }) => {
+    async ({ dateKey, totalHours, shiftName, startTime, endTime, workType, maxHoursPerUser, recurrence }) => {
       const [year, month, day] = dateKey.split("-").map(Number);
       setSubmitting(true);
       setBanner(null);
       try {
+        if (recurrence) {
+          const recurringResult = await releaseHoursRecurring({
+            startDate: dateKey,
+            endDate: recurrence.endDate,
+            frequency: recurrence.frequency,
+            weekdays: recurrence.weekdays,
+            totalHours,
+            shiftName,
+            startTime,
+            endTime,
+            workType,
+            ownerId: user?.id ?? "",
+            maxHoursPerUser,
+          });
+          setSubmitting(false);
+          if (!recurringResult.ok) {
+            setBanner({ kind: "error", text: recurringResult.error || "Failed to release recurring capacity." });
+            return;
+          }
+          setActiveDate(dateKey);
+          setAnchorDate(new Date(year, month - 1, day));
+          setMonthCursor({ year, month: month - 1 });
+          setAdminProjectFilter(workType);
+          await loadWeek(new Date(year, month - 1, day), true);
+          setBanner({
+            kind: "success",
+            text: `Released ${totalHours}h of ${workType} capacity (~${recurringResult.hoursPerDate}h/day) across ${recurringResult.datesCount} day${recurringResult.datesCount === 1 ? "" : "s"} (${recurrence.frequency}, through ${formatDateHeading(recurrence.endDate)}).`,
+          });
+          return;
+        }
         const releaseResult = await releaseHours(
           dateKey,
           totalHours,

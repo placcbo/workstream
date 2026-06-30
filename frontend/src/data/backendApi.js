@@ -60,6 +60,38 @@ export function releaseHours(dateKey, totalHours, blockSize, startSlot = 0, shif
   });
 }
 
+// frequency: "daily" | "weekly" | "monthly". `weekdays` is an array of
+// 0 (Sun) .. 6 (Sat), only used for daily/weekly — e.g. [1,2,3,4,5] for
+// Mon-Fri, [1,2,3,4,5,6] for Mon-Sat. Ignored for monthly, which instead
+// repeats on the same day-of-month as `startDate` until `endDate`.
+export function releaseHoursRecurring({
+  startDate,
+  endDate,
+  frequency,
+  weekdays = [],
+  totalHours,
+  shiftName,
+  startTime,
+  endTime,
+  workType,
+  ownerId,
+  maxHoursPerUser,
+}) {
+  return callApi(`/release-hours-recurring`, {
+    startDate,
+    endDate,
+    frequency,
+    weekdays,
+    totalHours,
+    shiftName,
+    startTime,
+    endTime,
+    workType,
+    ownerId,
+    maxHoursPerUser,
+  });
+}
+
 export function adjustReleasedHours(dateKey, blockId, totalHours, shiftName, startTime, endTime, workType, maxHoursPerUser) {
   return callApi(`/adjust-released-hours`, {
     dateKey,
