@@ -2459,6 +2459,33 @@
   background: rgba(121, 199, 221, 0.32);
   color: #d8eff5;
   opacity: 0.8;
+  position: relative;
+}
+
+/* Diagonal cross-hatch overlay marks a block as completed/expired and no
+   longer editable — a clear "locked" visual on top of the dimmed color
+   already applied above, distinct from --full (which just means no
+   capacity left, but is still a normal-looking active block). */
+.calendar-capacity-block--completed::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    repeating-linear-gradient(
+      45deg,
+      rgba(244, 239, 228, 0.16) 0,
+      rgba(244, 239, 228, 0.16) 1px,
+      transparent 1px,
+      transparent 9px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      rgba(244, 239, 228, 0.16) 0,
+      rgba(244, 239, 228, 0.16) 1px,
+      transparent 1px,
+      transparent 9px
+    );
 }
 
 .calendar-capacity-block--full {
