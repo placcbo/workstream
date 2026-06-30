@@ -56,22 +56,46 @@ type Summary struct {
 	RemainingHours int `json:"remainingHours"`
 }
 
+// Timer represents one user's currently-running work-tracking stopwatch.
+// Only one active timer per user at a time; StartAt is a Unix millisecond
+// timestamp so the client can compute elapsed time without trusting its own
+// clock drift relative to the server.
+type Timer struct {
+	UserID    string `json:"userId"`
+	StartAt   int64  `json:"startAt"`
+	TaskName  string `json:"taskName"`
+	BookingID string `json:"bookingId,omitempty"`
+	BlockID   string `json:"blockId,omitempty"`
+	DateKey   string `json:"dateKey,omitempty"`
+}
+
 type Store struct {
-	mu            sync.Mutex
-	releaseBlocks map[string][]Block
-	bookings      []Booking
-	projects      map[string][]string // Projects per admin: { adminId: [projectNames...] }
-	nextBlockID   int
-	nextBookingID int
+	mu               sync.Mutex
+	releaseBlocks    map[string][]Block
+	bookings         []Booking
+	projects         map[string][]string // Projects per admin: { adminId: [projectNames...] }
+	workTypeAccess   map[string][]string // { workType: [normalized emails...] } — extra grants beyond defaultWorkTypes
+	timers           map[string]*Timer   // keyed by userID — the user's currently-running timer, if any
+	reportedOverride map[string]float64  // keyed by userID — hours banked from stopped timers, on top of completed-booking hours
+	nextBlockID      int
+	nextBookingID    int
 }
 
 var store = &Store{
-	releaseBlocks: make(map[string][]Block),
-	bookings:      make([]Booking, 0),
-	projects:      make(map[string][]string),
-	nextBlockID:   100,
-	nextBookingID: 100,
+	releaseBlocks:    make(map[string][]Block),
+	bookings:         make([]Booking, 0),
+	projects:         make(map[string][]string),
+	workTypeAccess:   make(map[string][]string),
+	timers:           make(map[string]*Timer),
+	reportedOverride: make(map[string]float64),
+	nextBlockID:      100,
+	nextBookingID:    100,
 }
+
+// MaxPlausibleTimerHours mirrors the client-side cap: if a timer has been
+// running longer than this (e.g. the tab was closed and reopened days
+// later), we don't trust the elapsed time as real tracked work.
+const maxPlausibleTimerHours = 12
 
 const dayStartHour = 8
 const slotsPerDay = 24
@@ -182,6 +206,12 @@ func reservedForBlock(blockID string) int {
 
 func remainingForBlock(block Block) int {
 	return int(math.Max(0, float64(block.TotalHours-reservedForBlock(block.ID))))
+}
+
+// normalizeEmail mirrors AuthContext.jsx's normalizeEmail: trim + lowercase
+// so grants are matched consistently regardless of how the email was typed.
+func normalizeEmail(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func blockWorkType(dateKey, blockID string) string {
@@ -783,12 +813,353 @@ func handleAddProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, store.projects[req.AdminId])
 }
 
-// Router for projects endpoint - dispatches GET/POST
+// handleProjectsRouter dispatches /api/projects: GET lists an admin's
+// projects, POST adds a new one. Mirrors the same GET/POST split pattern
+// used by handleTimerRouter and handleSessionRouter below.
 func handleProjectsRouter(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		handleGetProjects(w, r)
 	} else if r.Method == http.MethodPost {
 		handleAddProject(w, r)
+	} else {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Work-type access (extra project grants beyond a user's defaultWorkTypes).
+// Mirrors AuthContext.jsx's workTypeAccess: { workType: [emails...] }.
+// ---------------------------------------------------------------------------
+
+// GET /api/work-type-access returns the full grant map.
+func handleGetWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	out := make(map[string][]string, len(store.workTypeAccess))
+	for k, v := range store.workTypeAccess {
+		out[k] = append([]string{}, v...)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// findWorkTypeKey returns the existing key matching workType case-insensitively,
+// or "" if no such key exists yet. Callers must hold store.mu.
+func findWorkTypeKey(workType string) string {
+	for key := range store.workTypeAccess {
+		if strings.EqualFold(key, workType) {
+			return key
+		}
+	}
+	return ""
+}
+
+// POST /api/work-type-access/grant { email, workType }
+func handleGrantWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email    string `json:"email"`
+		WorkType string `json:"workType"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
+		return
+	}
+	email := normalizeEmail(req.Email)
+	workType := strings.TrimSpace(req.WorkType)
+	if email == "" || workType == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "email and workType required"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	key := findWorkTypeKey(workType)
+	if key == "" {
+		key = workType
+	}
+	existing := store.workTypeAccess[key]
+	already := false
+	for _, e := range existing {
+		if e == email {
+			already = true
+			break
+		}
+	}
+	if !already {
+		store.workTypeAccess[key] = append(existing, email)
+	}
+	out := make(map[string][]string, len(store.workTypeAccess))
+	for k, v := range store.workTypeAccess {
+		out[k] = append([]string{}, v...)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// POST /api/work-type-access/revoke { email, workType }
+func handleRevokeWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email    string `json:"email"`
+		WorkType string `json:"workType"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
+		return
+	}
+	email := normalizeEmail(req.Email)
+	workType := strings.TrimSpace(req.WorkType)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	key := findWorkTypeKey(workType)
+	if key != "" {
+		existing := store.workTypeAccess[key]
+		next := make([]string, 0, len(existing))
+		for _, e := range existing {
+			if e != email {
+				next = append(next, e)
+			}
+		}
+		store.workTypeAccess[key] = next
+	}
+	out := make(map[string][]string, len(store.workTypeAccess))
+	for k, v := range store.workTypeAccess {
+		out[k] = append([]string{}, v...)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// ---------------------------------------------------------------------------
+// Work timer — one active stopwatch per user, held server-side so refreshing
+// the page or opening a second browser/tab reflects the same running timer
+// instead of relying on localStorage.
+// ---------------------------------------------------------------------------
+
+// GET /api/timer?userId=xxx returns the user's active timer, or null.
+// Also auto-stops (and banks) any timer that's been running implausibly
+// long, mirroring the client's previous stale-timer recovery logic.
+func handleGetTimer(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("userId")
+	if userID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "userId required"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	timer := store.timers[userID]
+	if timer == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"timer": nil, "bankedHours": store.reportedOverride[userID]})
+		return
+	}
+	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
+	if elapsedSeconds > maxPlausibleTimerHours*3600 {
+		addedHours := math.Round(maxPlausibleTimerHours*10) / 10
+		store.reportedOverride[userID] += addedHours
+		delete(store.timers, userID)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"timer":          nil,
+			"bankedHours":    store.reportedOverride[userID],
+			"autoStopped":    true,
+			"autoStoppedFor": addedHours,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"timer": timer, "bankedHours": store.reportedOverride[userID]})
+}
+
+// POST /api/timer/start { userId, taskName, bookingId, blockId, dateKey }
+func handleStartTimer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID    string `json:"userId"`
+		TaskName  string `json:"taskName"`
+		BookingID string `json:"bookingId"`
+		BlockID   string `json:"blockId"`
+		DateKey   string `json:"dateKey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
+		return
+	}
+	if req.UserID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "userId required"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	timer := &Timer{
+		UserID:    req.UserID,
+		StartAt:   time.Now().UnixMilli(),
+		TaskName:  req.TaskName,
+		BookingID: req.BookingID,
+		BlockID:   req.BlockID,
+		DateKey:   req.DateKey,
+	}
+	store.timers[req.UserID] = timer
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "timer": timer})
+}
+
+// POST /api/timer/stop { userId } — stops the active timer and banks the
+// elapsed time into reportedOverride (added to completed-booking hours to
+// form the user's effective reported hours).
+func handleStopTimer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID string `json:"userId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	timer := store.timers[req.UserID]
+	if timer == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "addedHours": 0.0, "bankedHours": store.reportedOverride[req.UserID]})
+		return
+	}
+	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
+	cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
+	addedHours := math.Round((cappedSeconds/3600)*10) / 10
+	store.reportedOverride[req.UserID] += addedHours
+	delete(store.timers, req.UserID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"addedHours":  addedHours,
+		"bankedHours": store.reportedOverride[req.UserID],
+	})
+}
+
+func handleTimerRouter(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		handleGetTimer(w, r)
+	} else {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Session — mocked Google auth. Login just looks the account up by ID (the
+// account list itself still lives client-side in AuthContext.jsx, same as
+// before — only *session persistence* moves server-side here) and returns
+// the resolved user with grantedWorkTypes computed from workTypeAccess, so a
+// page refresh or a second browser/private window can restore "who's logged
+// in" from the backend instead of localStorage.
+// ---------------------------------------------------------------------------
+
+type sessionAccount struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Email            string   `json:"email"`
+	AvatarURL        string   `json:"avatarUrl,omitempty"`
+	Role             string   `json:"role"`
+	DefaultWorkTypes []string `json:"defaultWorkTypes"`
+}
+
+// activeSessions maps a sessionId -> account, so the frontend can hold a
+// random session token instead of caching the whole user object itself.
+var activeSessions = struct {
+	mu sync.Mutex
+	m  map[string]sessionAccount
+}{m: make(map[string]sessionAccount)}
+
+func resolveGrantedWorkTypesForEmail(email string, defaultWorkTypes []string) []string {
+	normalizedEmail := normalizeEmail(email)
+	granted := map[string]struct{}{}
+	for _, wt := range defaultWorkTypes {
+		granted[wt] = struct{}{}
+	}
+	for workType, emails := range store.workTypeAccess {
+		for _, e := range emails {
+			if e == normalizedEmail {
+				granted[workType] = struct{}{}
+				break
+			}
+		}
+	}
+	out := make([]string, 0, len(granted))
+	for wt := range granted {
+		out = append(out, wt)
+	}
+	return out
+}
+
+// POST /api/session/login { account: sessionAccount } — stores the session
+// server-side and returns a sessionId plus the resolved user (with
+// grantedWorkTypes filled in). The frontend persists only the sessionId.
+func handleSessionLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Account sessionAccount `json:"account"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
+		return
+	}
+	if req.Account.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "account.id required"})
+		return
+	}
+	sessionID := fmt.Sprintf("sess-%s-%d", req.Account.ID, time.Now().UnixNano())
+	activeSessions.mu.Lock()
+	activeSessions.m[sessionID] = req.Account
+	activeSessions.mu.Unlock()
+
+	store.mu.Lock()
+	granted := resolveGrantedWorkTypesForEmail(req.Account.Email, req.Account.DefaultWorkTypes)
+	store.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sessionId": sessionID,
+		"user": map[string]any{
+			"id":               req.Account.ID,
+			"name":             req.Account.Name,
+			"email":            req.Account.Email,
+			"avatarUrl":        req.Account.AvatarURL,
+			"role":             req.Account.Role,
+			"defaultWorkTypes": req.Account.DefaultWorkTypes,
+			"grantedWorkTypes": granted,
+		},
+	})
+}
+
+// GET /api/session?sessionId=xxx restores the session (e.g. on page reload).
+func handleSessionGet(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("sessionId")
+	activeSessions.mu.Lock()
+	account, ok := activeSessions.m[sessionID]
+	activeSessions.mu.Unlock()
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"user": nil})
+		return
+	}
+	store.mu.Lock()
+	granted := resolveGrantedWorkTypesForEmail(account.Email, account.DefaultWorkTypes)
+	store.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user": map[string]any{
+			"id":               account.ID,
+			"name":             account.Name,
+			"email":            account.Email,
+			"avatarUrl":        account.AvatarURL,
+			"role":             account.Role,
+			"defaultWorkTypes": account.DefaultWorkTypes,
+			"grantedWorkTypes": granted,
+		},
+	})
+}
+
+// POST /api/session/logout { sessionId }
+func handleSessionLogout(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
+		return
+	}
+	activeSessions.mu.Lock()
+	delete(activeSessions.m, req.SessionID)
+	activeSessions.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func handleSessionRouter(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		handleSessionGet(w, r)
 	} else {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
 	}
@@ -807,6 +1178,15 @@ func main() {
 	http.HandleFunc("/api/update-booking-hours", withCORS(handleUpdateBookingHours))
 	http.HandleFunc("/api/cancel-booking", withCORS(handleCancelBooking))
 	http.HandleFunc("/api/projects", withCORS(handleProjectsRouter))
+	http.HandleFunc("/api/work-type-access", withCORS(handleGetWorkTypeAccess))
+	http.HandleFunc("/api/work-type-access/grant", withCORS(handleGrantWorkTypeAccess))
+	http.HandleFunc("/api/work-type-access/revoke", withCORS(handleRevokeWorkTypeAccess))
+	http.HandleFunc("/api/timer", withCORS(handleTimerRouter))
+	http.HandleFunc("/api/timer/start", withCORS(handleStartTimer))
+	http.HandleFunc("/api/timer/stop", withCORS(handleStopTimer))
+	http.HandleFunc("/api/session", withCORS(handleSessionRouter))
+	http.HandleFunc("/api/session/login", withCORS(handleSessionLogin))
+	http.HandleFunc("/api/session/logout", withCORS(handleSessionLogout))
 
 	addr := ":8080"
 	log.Printf("Go backend listening on %s", addr)

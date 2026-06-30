@@ -3,7 +3,10 @@ import LoginPage from "./pages/LoginPage";
 import BoardPage from "./pages/BoardPage";
 
 function AppShell() {
-  const { user } = useAuth();
+  const { user, authLoading } = useAuth();
+  if (authLoading) {
+    return <div className="app-boot-loading">Restoring your session…</div>;
+  }
   return user ? <BoardPage /> : <LoginPage />;
 }
 

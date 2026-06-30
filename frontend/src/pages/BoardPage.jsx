@@ -11,6 +11,9 @@ import {
   reserveHours,
   revokeBlock,
   updateBookingHours,
+  fetchActiveTimer,
+  startTimer as apiStartTimer,
+  stopTimer as apiStopTimer,
 } from "../data/backendApi";
 import { formatDateHeading, formatMonthHeading, MAX_HOURS_PER_DAY, toDateKey } from "../data/schedule";
 import Header from "../components/Header";
@@ -63,7 +66,10 @@ export default function BoardPage() {
   const [timerBookingId, setTimerBookingId] = useState(null);
   const [timerBlockId, setTimerBlockId] = useState(null);
   const [timerDateKey, setTimerDateKey] = useState(null);
-  const [reportedHoursOverride, setReportedHoursOverride] = useState(0);
+  // Hours banked from previously-stopped timers, on top of completed-booking
+  // hours. Lives entirely on the backend (Store.reportedOverride, keyed by
+  // userId) — fetched here, never written to localStorage.
+  const [bankedHours, setBankedHours] = useState(0);
   const [isRefreshingReserved, setIsRefreshingReserved] = useState(false);
 
   // Bug fix (Bug 3): clear admin modal state whenever the logged-in user
@@ -168,88 +174,62 @@ export default function BoardPage() {
     [committedHoursByWorkType]
   );
 
-  const effectiveReportedHours = summary.reportedHours + reportedHoursOverride;
-  const reportedHoursOverrideLoaded = useRef(false);
+  const effectiveReportedHours = summary.reportedHours + bankedHours;
 
+  // Pull the active timer (if any) from the backend whenever the user
+  // changes — this is what lets a second browser/private window, or a page
+  // refresh, see the SAME running timer instead of each tab inventing its
+  // own local state. No localStorage involved.
   useEffect(() => {
-    if (!user?.id) return;
-    try {
-      const stored = localStorage.getItem(`reportedHoursOverride_${user.id}`);
-      setReportedHoursOverride(stored ? Number(stored) : 0);
-    } catch {
-      setReportedHoursOverride(0);
-    } finally {
-      reportedHoursOverrideLoaded.current = true;
+    if (!user?.id) {
+      setTimerRunning(false);
+      setTimerStartAt(null);
+      setTimerTaskName("");
+      setTimerBookingId(null);
+      setTimerBlockId(null);
+      setTimerDateKey(null);
+      setTimerElapsedSeconds(0);
+      setBankedHours(0);
+      return;
     }
-  }, [user?.id]);
-
-  useEffect(() => {
-    if (!user?.id || !reportedHoursOverrideLoaded.current) return;
-    try {
-      localStorage.setItem(`reportedHoursOverride_${user.id}`, String(reportedHoursOverride));
-    } catch (err) {
-      console.error("Failed to persist reported hours override", err);
-    }
-  }, [reportedHoursOverride, user?.id]);
-
-  useEffect(() => {
-    if (!user?.id) return;
-    try {
-      const stored = localStorage.getItem(`timerState_${user.id}`);
-      if (!stored) return;
-      const parsed = JSON.parse(stored);
-      if (parsed?.timerRunning && parsed?.timerStartAt) {
-        const restoredSeconds = Math.max(0, Math.round((Date.now() - parsed.timerStartAt) / 1000));
-        const cappedSeconds = MAX_PLAUSIBLE_TIMER_HOURS * 3600;
-        if (restoredSeconds > cappedSeconds) {
-          // Stale/abandoned timer — bank a capped amount and stop, rather
-          // than resuming a stopwatch that's been "running" for days.
-          const addedHours = Math.round((cappedSeconds / 3600) * 10) / 10;
-          setReportedHoursOverride((current) => {
-            const next = current + addedHours;
-            try {
-              localStorage.setItem(`reportedHoursOverride_${user.id}`, String(next));
-            } catch (err) {
-              console.error("Failed to persist reported hours override", err);
-            }
-            return next;
-          });
-          localStorage.removeItem(`timerState_${user.id}`);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetchActiveTimer(user.id);
+        if (cancelled) return;
+        setBankedHours(res?.bankedHours ?? 0);
+        if (res?.autoStopped) {
           setBanner({
             kind: "warning",
-            text: `A timer was left running for over ${MAX_PLAUSIBLE_TIMER_HOURS}h and has been auto-stopped; ${addedHours}h was banked. Please verify your reported hours.`,
+            text: `A timer was left running for over ${MAX_PLAUSIBLE_TIMER_HOURS}h and has been auto-stopped on the server; ${res.autoStoppedFor}h was banked. Please verify your reported hours.`,
           });
-          return;
         }
-        setTimerRunning(true);
-        setTimerStartAt(parsed.timerStartAt);
-        setTimerTaskName(parsed.timerTaskName ?? "");
-        setTimerBookingId(parsed.timerBookingId ?? null);
-        setTimerBlockId(parsed.timerBlockId ?? null);
-        setTimerDateKey(parsed.timerDateKey ?? null);
-        setTimerElapsedSeconds(restoredSeconds);
+        if (res?.timer) {
+          const restoredSeconds = Math.max(0, Math.round((Date.now() - res.timer.startAt) / 1000));
+          setTimerRunning(true);
+          setTimerStartAt(res.timer.startAt);
+          setTimerTaskName(res.timer.taskName ?? "");
+          setTimerBookingId(res.timer.bookingId || null);
+          setTimerBlockId(res.timer.blockId || null);
+          setTimerDateKey(res.timer.dateKey || null);
+          setTimerElapsedSeconds(restoredSeconds);
+        } else {
+          setTimerRunning(false);
+          setTimerStartAt(null);
+          setTimerTaskName("");
+          setTimerBookingId(null);
+          setTimerBlockId(null);
+          setTimerDateKey(null);
+          setTimerElapsedSeconds(0);
+        }
+      } catch (err) {
+        console.error("Failed to fetch active timer from backend", err);
       }
-    } catch (err) {
-      console.error("Failed to restore timer state", err);
-    }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [user?.id]);
-
-  useEffect(() => {
-    if (!user?.id) return;
-    try {
-      const timerState = {
-        timerRunning,
-        timerStartAt,
-        timerTaskName,
-        timerBookingId,
-        timerBlockId,
-        timerDateKey,
-      };
-      localStorage.setItem(`timerState_${user.id}`, JSON.stringify(timerState));
-    } catch (err) {
-      console.error("Failed to persist timer state", err);
-    }
-  }, [timerRunning, timerStartAt, timerTaskName, timerBookingId, timerBlockId, timerDateKey, user?.id]);
 
   useEffect(() => {
     if (!showReservedBlocks) return;
@@ -322,47 +302,55 @@ export default function BoardPage() {
       : `${pad(hours)}:${pad(minutes)}:${pad(secs)}`;
   }, []);
 
-  const handleStartWorking = useCallback((taskName = "", booking = {}) => {
-    if (taskName) setTimerTaskName(taskName);
-    setTimerBookingId(booking.bookingId ?? null);
-    setTimerBlockId(booking.blockId ?? null);
-    setTimerDateKey(booking.dateKey ?? null);
-    setTimerStartAt(Date.now());
-    setTimerRunning(true);
-    setTimerElapsedSeconds(0);
-    setBanner({ kind: "success", text: "Timer started." });
-  }, []);
+  const handleStartWorking = useCallback(async (taskName = "", booking = {}) => {
+    if (!user?.id) return;
+    setBanner(null);
+    try {
+      const res = await apiStartTimer(
+        user.id,
+        taskName,
+        booking.bookingId ?? "",
+        booking.blockId ?? "",
+        booking.dateKey ?? ""
+      );
+      if (!res?.ok || !res?.timer) {
+        setBanner({ kind: "error", text: "Could not start the timer — backend rejected the request." });
+        return;
+      }
+      setTimerTaskName(res.timer.taskName ?? taskName ?? "");
+      setTimerBookingId(res.timer.bookingId || null);
+      setTimerBlockId(res.timer.blockId || null);
+      setTimerDateKey(res.timer.dateKey || null);
+      setTimerStartAt(res.timer.startAt);
+      setTimerRunning(true);
+      setTimerElapsedSeconds(0);
+      setBanner({ kind: "success", text: "Timer started." });
+    } catch (err) {
+      setBanner({ kind: "error", text: "Backend unreachable — could not start timer." });
+    }
+  }, [user?.id]);
 
   const handleStopWorking = useCallback(async () => {
-    if (!timerRunning) return;
-    setTimerRunning(false);
-    setTimerStartAt(null);
-    const addedHours = Math.round((timerElapsedSeconds / 3600) * 10) / 10;
-    setReportedHoursOverride((current) => {
-      const next = current + addedHours;
-      try {
-        if (user?.id) {
-          localStorage.setItem(`reportedHoursOverride_${user.id}`, String(next));
-        }
-      } catch (err) {
-        console.error("Failed to persist reported hours override", err);
-      }
-      return next;
-    });
-    setTimerElapsedSeconds(0);
-    setTimerTaskName("");
-    setTimerBookingId(null);
-    setTimerBlockId(null);
-    setTimerDateKey(null);
-
+    if (!timerRunning || !user?.id) return;
     try {
-      const refreshedSummary = await fetchUserHoursSummary(dateKeys, user?.id ?? "");
+      const res = await apiStopTimer(user.id);
+      setTimerRunning(false);
+      setTimerStartAt(null);
+      setTimerElapsedSeconds(0);
+      setTimerTaskName("");
+      setTimerBookingId(null);
+      setTimerBlockId(null);
+      setTimerDateKey(null);
+      if (res?.ok) {
+        setBankedHours(res.bankedHours ?? 0);
+      }
+      const refreshedSummary = await fetchUserHoursSummary(dateKeys, user.id);
       setSummary(refreshedSummary);
       setBanner({ kind: "success", text: "Timer stopped and backend confirmed." });
     } catch (err) {
-      setBanner({ kind: "warning", text: "Timer stopped, but backend confirmation failed." });
+      setBanner({ kind: "warning", text: "Timer stopped locally, but backend confirmation failed." });
     }
-  }, [timerElapsedSeconds, timerRunning, dateKeys, user?.id]);
+  }, [timerRunning, dateKeys, user?.id]);
 
   useEffect(() => {
     if (!timerRunning) return undefined;
@@ -370,8 +358,10 @@ export default function BoardPage() {
       setTimerElapsedSeconds((current) => {
         const next = current + 1;
         if (next >= MAX_PLAUSIBLE_TIMER_HOURS * 3600) {
-          // Auto-stop on the next tick via handleStopWorking so the elapsed
-          // time gets banked and the timer can't run away indefinitely.
+          // The backend enforces the real cap (it auto-stops + banks on the
+          // next GET /api/timer or POST /api/timer/stop) — calling stop here
+          // just makes sure that happens promptly rather than waiting for
+          // the user to next interact with the page.
           setTimeout(() => handleStopWorking(), 0);
         }
         return next;

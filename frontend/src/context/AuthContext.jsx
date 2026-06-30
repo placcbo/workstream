@@ -1,4 +1,12 @@
-import { createContext, useContext, useState, useCallback, useEffect, useMemo } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useMemo, useRef } from "react";
+import {
+  fetchSession,
+  loginSession,
+  logoutSession,
+  fetchWorkTypeAccess,
+  grantWorkTypeAccess as apiGrantWorkTypeAccess,
+  revokeWorkTypeAccess as apiRevokeWorkTypeAccess,
+} from "../data/backendApi";
 
 // ---------------------------------------------------------------------------
 // Mocked Google auth.
@@ -9,41 +17,25 @@ import { createContext, useContext, useState, useCallback, useEffect, useMemo } 
 // The shape of `user` (id, name, email, avatarUrl, role) is kept identical
 // so nothing downstream needs to change.
 //
+// Everything about WHO is logged in and WHAT they have access to lives on
+// the backend (in-memory Store in main.go) now — the browser only ever
+// holds the opaque `sessionId` returned by POST /api/session/login, in
+// localStorage, purely so a page refresh can ask the backend "who is this"
+// again via GET /api/session?sessionId=... . No user object, no
+// workTypeAccess map, and no project list are ever written to localStorage;
+// they're fetched fresh from the backend on every load, so a second
+// browser/private window always reflects the same server-side truth.
+//
 // Work-type access: every account has a `defaultWorkTypes` array (the
 // project(s) they start with). Admins can grant ADDITIONAL work types to any
 // user for any project — e.g. a normally Extraction-only worker can be
 // granted Cooking access too, and from then on sees + can claim blocks from
 // both projects, each with its own independent 8h/day cap. Grants are stored
-// as { workType: [emails...] } so this generalizes to any number of projects,
-// not just "Extraction".
+// server-side as { workType: [emails...] } so this generalizes to any number
+// of projects, not just "Extraction".
 // ---------------------------------------------------------------------------
 
-function normalizeEmail(value) {
-  return value.trim().toLowerCase();
-}
-
-/**
- * Collapse keys that differ only by case (e.g. "hubdoc" and "Hubdoc") into a
- * single key, merging their email lists. Whichever casing is encountered
- * first (object key order) is kept as canonical. This exists to clean up
- * data that was written before project names were made case-insensitive —
- * new writes shouldn't produce duplicates in the first place, but this keeps
- * already-stored data (e.g. in a person's browser localStorage) consistent
- * too, without requiring them to manually clear it.
- */
-function mergeCaseInsensitiveKeys(workTypeAccess) {
-  const canonicalKeyByLowerCase = new Map();
-  const merged = {};
-  Object.entries(workTypeAccess).forEach(([workType, emails]) => {
-    const lowerKey = workType.toLowerCase();
-    const canonicalKey = canonicalKeyByLowerCase.get(lowerKey) ?? workType;
-    canonicalKeyByLowerCase.set(lowerKey, canonicalKey);
-    const existing = merged[canonicalKey] ?? [];
-    merged[canonicalKey] = Array.from(new Set([...existing, ...emails]));
-  });
-  return merged;
-}
-
+const SESSION_STORAGE_KEY = "sessionId";
 
 export const WORK_TYPES = [];
 
@@ -114,78 +106,70 @@ export const MOCK_ACCOUNTS = [
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => {
-    try {
-      const stored = localStorage.getItem("loggedInUser");
-      return stored ? JSON.parse(stored) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [user, setUser] = useState(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true); // restoring session on first load
   // { [workType]: string[] of normalized emails granted EXTRA access to that workType }
-  // Persisted to localStorage so projects and access grants survive logout/login.
-  const [workTypeAccess, setWorkTypeAccess] = useState(() => {
-    try {
-      const stored = localStorage.getItem("workTypeAccess");
-      return stored ? mergeCaseInsensitiveKeys(JSON.parse(stored)) : {};
-    } catch {
-      return {};
-    }
-  });
+  // Always fetched fresh from the backend — never cached in localStorage.
+  const [workTypeAccess, setWorkTypeAccess] = useState({});
   // Admin-created custom project names fetched from backend
   const [customWorkTypes, setCustomWorkTypes] = useState(() => []);
 
-  const resolveGrantedWorkTypes = useCallback(
-    (email, defaultWorkTypes = []) => {
-      const normalizedEmail = email ? normalizeEmail(email) : null;
-      const granted = new Set(Array.isArray(defaultWorkTypes) ? defaultWorkTypes : []);
-      if (normalizedEmail) {
-        Object.entries(workTypeAccess).forEach(([workType, emails]) => {
-          if (emails.includes(normalizedEmail)) granted.add(workType);
-        });
-      }
-      return Array.from(granted);
-    },
-    [workTypeAccess]
-  );
+  const sessionIdRef = useRef(null);
 
-  useEffect(() => {
-    if (!user?.email) return;
-    setUser((current) => {
-      if (!current) return current;
-      const nextGranted = resolveGrantedWorkTypes(current.email, current.defaultWorkTypes);
-      const sameLength = nextGranted.length === current.grantedWorkTypes?.length;
-      const sameSet = sameLength && nextGranted.every((wt) => current.grantedWorkTypes.includes(wt));
-      if (sameSet) return current;
-      return { ...current, grantedWorkTypes: nextGranted };
-    });
-  }, [resolveGrantedWorkTypes, user?.email]);
-
-  // Persist workTypeAccess to localStorage whenever it changes
-  useEffect(() => {
+  // Pull workTypeAccess from the backend. Exposed so callers (grant/revoke,
+  // or a manual refresh) can re-sync without a full page reload.
+  const refreshWorkTypeAccess = useCallback(async () => {
     try {
-      localStorage.setItem("workTypeAccess", JSON.stringify(workTypeAccess));
-    } catch (e) {
-      console.error("Failed to persist workTypeAccess to localStorage", e);
-    }
-  }, [workTypeAccess]);
-
-  // Function to fetch projects from backend
-  const fetchProjectsFromBackend = useCallback(async () => {
-    if (!user?.id) return;
-    try {
-      const res = await fetch(`http://localhost:8080/api/projects?adminId=${user.id}`);
-      if (res.ok) {
-        const projects = await res.json();
-        setCustomWorkTypes(projects || []);
-        return projects || [];
-      }
+      const access = await fetchWorkTypeAccess();
+      setWorkTypeAccess(access || {});
+      return access || {};
     } catch (err) {
-      console.error("Failed to fetch projects from backend", err);
+      console.error("Failed to fetch workTypeAccess from backend", err);
+      return {};
     }
-    return [];
-  }, [user?.id]);
+  }, []);
+
+  // On first mount: if a sessionId is stored, ask the backend who that is.
+  // This is the ONLY thing read from localStorage — a bare opaque token,
+  // not user data. If the backend doesn't recognise it (e.g. server
+  // restarted), we just fall back to the login page.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const storedSessionId = (() => {
+        try {
+          return localStorage.getItem(SESSION_STORAGE_KEY);
+        } catch {
+          return null;
+        }
+      })();
+
+      await refreshWorkTypeAccess();
+
+      if (storedSessionId) {
+        try {
+          const res = await fetchSession(storedSessionId);
+          if (!cancelled && res?.user) {
+            sessionIdRef.current = storedSessionId;
+            setUser(res.user);
+          } else if (!cancelled) {
+            try {
+              localStorage.removeItem(SESSION_STORAGE_KEY);
+            } catch (err) {
+              console.error("Failed to clear stale sessionId", err);
+            }
+          }
+        } catch (err) {
+          console.error("Failed to restore session from backend", err);
+        }
+      }
+      if (!cancelled) setAuthLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshWorkTypeAccess]);
 
   // Fetch projects from backend when user logs in
   useEffect(() => {
@@ -193,50 +177,45 @@ export function AuthProvider({ children }) {
       setCustomWorkTypes([]);
       return;
     }
+    let cancelled = false;
     const doFetch = async () => {
       try {
         const res = await fetch(`http://localhost:8080/api/projects?adminId=${user.id}`);
         if (res.ok) {
           const projects = await res.json();
-          console.log("Fetched projects for admin:", user.id, projects);
-          setCustomWorkTypes(projects || []);
+          if (!cancelled) setCustomWorkTypes(projects || []);
         }
       } catch (err) {
         console.error("Failed to fetch projects from backend", err);
       }
     };
     doFetch();
+    return () => {
+      cancelled = true;
+    };
   }, [user?.id]);
 
-  /** Grant a user (by email) access to an additional work type/project. */
-  const grantWorkTypeAccess = useCallback((email, workType) => {
-    const normalizedEmail = normalizeEmail(email);
+  /** Grant a user (by email) access to an additional work type/project. Backend is the source of truth. */
+  const grantWorkTypeAccess = useCallback(async (email, workType) => {
     const trimmedWorkType = typeof workType === "string" ? workType.trim() : "";
-    if (!normalizedEmail || !trimmedWorkType) return;
-    setWorkTypeAccess((current) => {
-      // If a key already exists that only differs by case (e.g. "hubdoc" vs
-      // "Hubdoc"), reuse that key instead of creating a second, duplicate
-      // entry — project names are case-insensitive everywhere else now, so
-      // grants should be too.
-      const existingKey =
-        Object.keys(current).find((key) => key.toLowerCase() === trimmedWorkType.toLowerCase()) ?? trimmedWorkType;
-      const existing = current[existingKey] ?? [];
-      if (existing.includes(normalizedEmail)) return current;
-      return { ...current, [existingKey]: [...existing, normalizedEmail] };
-    });
+    if (!email || !trimmedWorkType) return;
+    try {
+      const next = await apiGrantWorkTypeAccess(email, trimmedWorkType);
+      setWorkTypeAccess(next || {});
+    } catch (err) {
+      console.error("Failed to grant work type access", err);
+    }
   }, []);
 
-  /** Revoke a previously granted (extra) work type from a user. */
-  const revokeWorkTypeAccess = useCallback((email, workType) => {
-    const normalizedEmail = normalizeEmail(email);
+  /** Revoke a previously granted (extra) work type from a user. Backend is the source of truth. */
+  const revokeWorkTypeAccess = useCallback(async (email, workType) => {
     const trimmedWorkType = typeof workType === "string" ? workType.trim() : "";
-    setWorkTypeAccess((current) => {
-      const existingKey = Object.keys(current).find((key) => key.toLowerCase() === trimmedWorkType.toLowerCase());
-      if (!existingKey) return current;
-      const existing = current[existingKey] ?? [];
-      if (!existing.includes(normalizedEmail)) return current;
-      return { ...current, [existingKey]: existing.filter((entry) => entry !== normalizedEmail) };
-    });
+    try {
+      const next = await apiRevokeWorkTypeAccess(email, trimmedWorkType);
+      setWorkTypeAccess(next || {});
+    } catch (err) {
+      console.error("Failed to revoke work type access", err);
+    }
   }, []);
 
   /** Add custom work type for current admin - sends to backend */
@@ -256,7 +235,6 @@ export function AuthProvider({ children }) {
         return res.json();
       })
       .then(projects => {
-        console.log("Project added, backend returned:", projects);
         setCustomWorkTypes(projects || []);
       })
       .catch(err => {
@@ -271,49 +249,61 @@ export function AuthProvider({ children }) {
   const clearCustomWorkTypes = useCallback(() => setCustomWorkTypes([]), []);
 
   const login = useCallback(
-    (accountId) => {
+    async (accountId) => {
       setIsAuthenticating(true);
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          const account = MOCK_ACCOUNTS.find((a) => a.id === accountId);
-          const resolvedAccount = account
-            ? {
-                ...account,
-                defaultWorkTypes: Array.isArray(account.defaultWorkTypes) ? account.defaultWorkTypes : [],
-                grantedWorkTypes: resolveGrantedWorkTypes(account.email, account.defaultWorkTypes ?? []),
-              }
-            : null;
-          setUser(resolvedAccount);
-          try {
-            if (resolvedAccount) {
-              localStorage.setItem("loggedInUser", JSON.stringify(resolvedAccount));
-            }
-          } catch (err) {
-            console.error("Failed to persist logged-in user", err);
-          }
-          setIsAuthenticating(false);
-          resolve(resolvedAccount);
-        }, 350);
-      });
+      const account = MOCK_ACCOUNTS.find((a) => a.id === accountId);
+      if (!account) {
+        setIsAuthenticating(false);
+        return null;
+      }
+      try {
+        // Backend resolves grantedWorkTypes (defaultWorkTypes + any grants)
+        // and hands back a sessionId — the session itself lives server-side.
+        const res = await loginSession({
+          id: account.id,
+          name: account.name,
+          email: account.email,
+          avatarUrl: account.avatarUrl,
+          role: account.role,
+          defaultWorkTypes: Array.isArray(account.defaultWorkTypes) ? account.defaultWorkTypes : [],
+        });
+        sessionIdRef.current = res.sessionId;
+        try {
+          localStorage.setItem(SESSION_STORAGE_KEY, res.sessionId);
+        } catch (err) {
+          console.error("Failed to persist sessionId", err);
+        }
+        setUser(res.user);
+        setIsAuthenticating(false);
+        return res.user;
+      } catch (err) {
+        console.error("Login failed — backend unreachable", err);
+        setIsAuthenticating(false);
+        return null;
+      }
     },
-    [resolveGrantedWorkTypes]
+    []
   );
 
   const logout = useCallback(() => {
+    const sessionId = sessionIdRef.current;
     setUser(null);
+    sessionIdRef.current = null;
     try {
-      localStorage.removeItem("loggedInUser");
+      localStorage.removeItem(SESSION_STORAGE_KEY);
     } catch (err) {
-      console.error("Failed to remove logged-in user", err);
+      console.error("Failed to remove sessionId", err);
+    }
+    if (sessionId) {
+      logoutSession(sessionId).catch((err) => console.error("Failed to notify backend of logout", err));
     }
   }, []);
 
   const value = useMemo(
     () => ({
-      user: user
-        ? { ...user, grantedWorkTypes: resolveGrantedWorkTypes(user.email, user.defaultWorkTypes ?? []) }
-        : null,
+      user,
       isAuthenticating,
+      authLoading,
       login,
       logout,
       workTypeAccess,
@@ -324,7 +314,7 @@ export function AuthProvider({ children }) {
       removeCustomWorkType,
       clearCustomWorkTypes,
     }),
-    [user, isAuthenticating, login, logout, resolveGrantedWorkTypes, workTypeAccess, grantWorkTypeAccess, revokeWorkTypeAccess, customWorkTypes, addCustomWorkType, removeCustomWorkType, clearCustomWorkTypes]
+    [user, isAuthenticating, authLoading, login, logout, workTypeAccess, grantWorkTypeAccess, revokeWorkTypeAccess, customWorkTypes, addCustomWorkType, removeCustomWorkType, clearCustomWorkTypes]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

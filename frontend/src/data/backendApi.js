@@ -80,4 +80,43 @@ export function cancelBooking(bookingId, userId) {
   return callApi(`/cancel-booking`, { bookingId, userId });
 }
 
+// ── Session (replaces localStorage "loggedInUser") ────────────────────────
+export function loginSession(account) {
+  return callApi(`/session/login`, { account });
+}
+
+export function fetchSession(sessionId) {
+  return getApi(`/session?sessionId=${encodeURIComponent(sessionId)}`);
+}
+
+export function logoutSession(sessionId) {
+  return callApi(`/session/logout`, { sessionId });
+}
+
+// ── Work-type access grants (replaces localStorage "workTypeAccess") ──────
+export function fetchWorkTypeAccess() {
+  return getApi(`/work-type-access`);
+}
+
+export function grantWorkTypeAccess(email, workType) {
+  return callApi(`/work-type-access/grant`, { email, workType });
+}
+
+export function revokeWorkTypeAccess(email, workType) {
+  return callApi(`/work-type-access/revoke`, { email, workType });
+}
+
+// ── Work timer (replaces localStorage "timerState_*" / "reportedHoursOverride_*") ──
+export function fetchActiveTimer(userId) {
+  return getApi(`/timer?userId=${encodeURIComponent(userId)}`);
+}
+
+export function startTimer(userId, taskName, bookingId, blockId, dateKey) {
+  return callApi(`/timer/start`, { userId, taskName, bookingId, blockId, dateKey });
+}
+
+export function stopTimer(userId) {
+  return callApi(`/timer/stop`, { userId });
+}
+
 export { toDateKey } from "./schedule";
