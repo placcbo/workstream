@@ -788,7 +788,7 @@ export default function BoardPage() {
                     </div>
                   </div>
                 </div>
-                <div className="reserved-blocks-right">
+                <div className={`reserved-blocks-right ${timerRunning ? "reserved-blocks-right--tracking" : ""}`}>
                   <div className="reserved-blocks-titlebar">
                     <span>Your reserved block(s)</span>
                     <button
@@ -825,7 +825,7 @@ export default function BoardPage() {
                           ? Math.min(100, Math.max(0, (liveWorkedHours / block.myHours) * 100))
                           : 0;
                         return (
-                        <div key={block.id} className="reserved-block-card reserved-block-card--task">
+                        <div key={block.id} className={`reserved-block-card reserved-block-card--task ${isCurrentTask ? "reserved-block-card--active" : ""}`}>
                         <div className="reserved-block-card-title-row">
                           <div>
                             <div className="reserved-block-card-label">{block.workType || "Task"}</div>
@@ -833,21 +833,24 @@ export default function BoardPage() {
                           </div>
                           <div className="reserved-block-card-meta">
                             <span className={`reserved-block-card-duration ${isCurrentTask ? "reserved-block-card-duration--live" : ""}`}>{remainingHours.toFixed(2)}h</span>
+                            {isCurrentTask ? (
+                              // Step 3: stopping now lives solely on the big timer card —
+                              // this badge just reflects state, it doesn't duplicate the action.
+                              <span className="reserved-block-card-tracking-badge">
+                                <span className="reserved-block-card-tracking-dot" aria-hidden="true" />
+                                Tracking
+                              </span>
+                            ) : (
                             <button
                               className={
                                 `btn btn--ghost reserved-block-card-start ${
-                                  !isCurrentTask && !timerRunning && expired
+                                  !timerRunning && expired
                                     ? "btn--disabled"
                                     : ""
                                 }`
                               }
-                              disabled={!isCurrentTask && !timerRunning && expired}
+                              disabled={!timerRunning && expired}
                               onClick={() => {
-                                if (isCurrentTask) {
-                                  handleStopWorking();
-                                  return;
-                                }
-
                                 if (timerRunning) {
                                   setBanner({
                                     kind: "error",
@@ -878,10 +881,11 @@ export default function BoardPage() {
                                   dateKey: block.dateKey,
                                 });
                               }}
-                              title={!isCurrentTask && !timerRunning && expired ? "This block has expired" : undefined}
+                              title={!timerRunning && expired ? "This block has expired" : undefined}
                             >
-                              {isCurrentTask ? "Stop timer" : expired ? "Expired" : hasPriorWork ? "Resume" : "Start timer"}
+                              {expired ? "Expired" : hasPriorWork ? "Resume" : "Start timer"}
                             </button>
+                            )}
                           </div>
                         </div>
                         <div className="reserved-block-card-progress-track">

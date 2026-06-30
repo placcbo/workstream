@@ -279,6 +279,17 @@
   background: rgba(255, 255, 255, 0.11);
 }
 
+.reserved-block-card--active {
+  border-left: 3px solid #ec4899;
+  background: rgba(236, 72, 153, 0.06);
+  box-shadow: 0 0 0 1px rgba(236, 72, 153, 0.18) inset;
+}
+
+.reserved-blocks-right--tracking {
+  box-shadow: 0 0 0 1px rgba(236, 72, 153, 0.25);
+  border-radius: 18px;
+}
+
 .reserved-blocks-titlebar {
   display: flex;
   align-items: center;
@@ -333,6 +344,25 @@
   font-weight: 700;
   color: #eef2f8;
   margin-bottom: 8px;
+}
+
+.reserved-block-card-tracking-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: #ffd9ec;
+  padding: 8px 14px;
+}
+
+.reserved-block-card-tracking-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ec4899;
+  box-shadow: 0 0 0 3px rgba(236, 72, 153, 0.25);
+  animation: reserved-duration-pulse 2s ease-in-out infinite;
 }
 
 .reserved-block-card-progress-track {
