@@ -773,7 +773,6 @@ export default function BoardPage() {
                       </button>
                     </div>
                   )}
-                  <div className="reserved-timer-summary">Total reported hours: {effectiveReportedHours.toFixed(2)}h</div>
                   <div className="reserved-timer-footer">
                     <div className="reserved-timer-user">
                       {user?.avatarUrl ? (
@@ -785,6 +784,9 @@ export default function BoardPage() {
                         <div className="reserved-timer-name">{user?.name ?? "Work user"}</div>
                         <div className="reserved-timer-email">{user?.email ?? "No email"}</div>
                       </div>
+                    </div>
+                    <div className="reserved-timer-summary reserved-timer-summary--footer">
+                      Reported: {effectiveReportedHours.toFixed(2)}h
                     </div>
                   </div>
                 </div>

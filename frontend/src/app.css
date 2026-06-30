@@ -137,11 +137,19 @@
 
 .reserved-timer-footer {
   display: flex;
-  justify-content: flex-start;
+  justify-content: space-between;
   align-items: center;
   gap: 16px;
   padding-top: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.reserved-timer-summary--footer {
+  text-align: right;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.8rem;
+  margin-top: 0;
+  white-space: nowrap;
 }
 
 .reserved-timer-user {
