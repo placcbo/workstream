@@ -63,3 +63,35 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 		t.Fatalf("expected admin role, got %v", out.User["role"])
 	}
 }
+
+func TestRegisterRejectsShortPassword(t *testing.T) {
+	store = &Store{
+		releaseBlocks:    make(map[string][]Block),
+		projects:         make(map[string][]string),
+		workTypeAccess:   make(map[string][]string),
+		users:            make(map[string]User),
+		timers:           make(map[string]*Timer),
+		reportedOverride: make(map[string]float64),
+		bookingBanked:    make(map[string]float64),
+		nextBlockID:      100,
+		nextBookingID:    100,
+		nextUserID:       1,
+	}
+
+	registerReq := map[string]any{
+		"name":       "Short Password",
+		"email":      "short@example.com",
+		"password":   "1234567",
+		"role":       "user",
+		"inviteCode": "",
+	}
+	body, _ := json.Marshal(registerReq)
+	req := httptest.NewRequest("POST", "/api/register", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	handleRegister(rec, req)
+
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for short password, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}

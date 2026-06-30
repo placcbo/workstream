@@ -10,6 +10,12 @@ export default function LoginPage() {
   const handleSubmit = async (event) => {
     event.preventDefault();
     setMessage({ kind: "", text: "" });
+
+    if (mode === "register" && form.password.trim().length < 8) {
+      setMessage({ kind: "error", text: "Password must be at least 8 characters long." });
+      return;
+    }
+
     try {
       if (mode === "register") {
         const result = await register(form);
@@ -75,7 +81,18 @@ export default function LoginPage() {
 
           <label className="auth-field">
             <span className="auth-label">Password</span>
-            <input className="auth-input" type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Enter password" required />
+            <input
+              className="auth-input"
+              type="password"
+              name="password"
+              autoComplete={mode === "register" ? "new-password" : "current-password"}
+              minLength={8}
+              value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+              placeholder={mode === "register" ? "Choose a password" : "Enter password"}
+              required
+            />
+            {mode === "register" && <span className="auth-hint">Use at least 8 characters.</span>}
           </label>
 
           {mode === "register" && form.role === "admin" && (

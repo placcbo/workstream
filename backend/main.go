@@ -1410,6 +1410,10 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name, email, and password are required"})
 		return
 	}
+	if len(password) < 8 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "password must be at least 8 characters"})
+		return
+	}
 	if role != "user" && role != "admin" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "role must be 'user' or 'admin'"})
 		return
