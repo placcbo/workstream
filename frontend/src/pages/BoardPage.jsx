@@ -778,6 +778,15 @@ export default function BoardPage() {
         {showReservedBlocks && (
           <div className="reserved-blocks-overlay" role="dialog" aria-modal="true" onClick={() => setShowReservedBlocks(false)}>
             <div className="reserved-blocks-panel" onClick={(event) => event.stopPropagation()}>
+              <button
+                type="button"
+                className="reserved-blocks-close"
+                onClick={() => setShowReservedBlocks(false)}
+                aria-label="Close"
+                title="Close"
+              >
+                ✕
+              </button>
               <div className="reserved-blocks-modal-grid">
                 <div className="reserved-timer-card">
                   <div className="reserved-timer-header">
@@ -849,6 +858,15 @@ export default function BoardPage() {
                         const blockBookingId = block.bookings?.find((booking) => booking.isMine)?.id ?? null;
                         const isCurrentTask = timerRunning && timerBookingId != null && timerBookingId === blockBookingId;
                         const expired = isShiftExpired(block.dateKey, block.endTime, block.startTime);
+                        const outsideShiftWindow = !expired && !isNowInShiftWindow(block.dateKey, block.startTime, block.endTime);
+                        const willSwitchTimer = timerRunning && !isCurrentTask && !expired && !outsideShiftWindow;
+                        const startDisabledReason = expired
+                          ? "This block has expired."
+                          : outsideShiftWindow
+                          ? `Cannot start — outside this block's working hours (${block.startTime}–${block.endTime}).`
+                          : willSwitchTimer
+                          ? `This will stop your timer on ${timerTaskName || "the current task"} and start tracking this block instead.`
+                          : undefined;
                         const workedHours = blockBookingId != null ? (bookingBanked[blockBookingId] ?? 0) : 0;
                         // While this exact block is the one being actively tracked, fold the
                         // live stopwatch into the "worked so far" figure so the badge ticks
@@ -884,21 +902,11 @@ export default function BoardPage() {
                             <button
                               className={
                                 `btn btn--ghost reserved-block-card-start ${
-                                  !timerRunning && expired
-                                    ? "btn--disabled"
-                                    : ""
+                                  expired || outsideShiftWindow ? "btn--disabled" : ""
                                 }`
                               }
                               disabled={!timerRunning && expired}
-                              onClick={() => {
-                                if (timerRunning) {
-                                  setBanner({
-                                    kind: "error",
-                                    text: "Stop the current timer before starting another.",
-                                  });
-                                  return;
-                                }
-
+                              onClick={async () => {
                                 if (expired) {
                                   setBanner({
                                     kind: "error",
@@ -915,13 +923,20 @@ export default function BoardPage() {
                                   return;
                                 }
 
+                                if (timerRunning) {
+                                  // Switching tasks: stop (and bank) the currently running
+                                  // timer before starting the newly selected block, rather
+                                  // than blocking the user from switching.
+                                  await handleStopWorking();
+                                }
+
                                 handleStartWorking(block.workType || block.shiftName || "Task", {
                                   bookingId: blockBookingId,
                                   blockId: block.id,
                                   dateKey: block.dateKey,
                                 });
                               }}
-                              title={!timerRunning && expired ? "This block has expired" : undefined}
+                              title={startDisabledReason}
                             >
                               {expired ? "Expired" : hasPriorWork ? "Resume" : "Start timer"}
                             </button>
