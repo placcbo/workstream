@@ -77,46 +77,18 @@ export default function WeekGrid({
               { releasedHours: 0, reservedHours: 0, remainingHours: 0 }
             )
           : dayInfo.summary;
-        // For workers, the day summary should reflect THEIR OWN claimed
-        // hours against THEIR OWN per-block cap — not the admin's
-        // shared-pool totals (e.g. "32h reserved" out of a 50h block makes
-        // no sense to a worker capped at 8h on that block). Sum each
-        // block's myHours and maxHoursPerUser instead. Scoped to the same
-        // visible-to-worker set as the block tiles below, so an exhausted
-        // block the worker never touched doesn't inflate "myCap" or trigger
-        // the summary to render for an otherwise-empty day.
-        const visibleBlocksForWorker = isAdmin
-          ? filteredBlocks
-          : filteredBlocks.filter((block) => (block.remainingHours ?? 0) > 0 || (block.myHours ?? 0) > 0);
-        const myDaySummary = visibleBlocksForWorker.reduce(
-          (summary, block) => {
-            const cap = block.maxHoursPerUser > 0 ? block.maxHoursPerUser : 8;
-            summary.myHours += block.myHours ?? 0;
-            summary.myCap += cap;
-            return summary;
-          },
-          { myHours: 0, myCap: 0 }
-        );
           return (
             <div key={dateKey} className="week-grid-column">
               {Array.from({ length: maxRows }, (_, row) => (
                 <div key={row} className="week-grid-cell" style={{ height: ROW_HEIGHT }} />
               ))}
 
-              {(isAdmin ? filteredBlocks.length > 0 : visibleBlocksForWorker.length > 0) && (
+              {isAdmin && filteredBlocks.length > 0 && (
                 <div className="week-grid-day-summary">
-                  {isAdmin ? (
-                    <>
-                      <strong>{daySummary.releasedHours}h released</strong>
-                      <span>
-                        {daySummary.reservedHours}h reserved • {daySummary.remainingHours}h remaining
-                      </span>
-                    </>
-                  ) : myDaySummary.myCap > 0 ? (
-                    <span>
-                      {myDaySummary.myHours}h of {myDaySummary.myCap}h claimed
-                    </span>
-                  ) : null}
+                  <strong>{daySummary.releasedHours}h released</strong>
+                  <span>
+                    {daySummary.reservedHours}h reserved • {daySummary.remainingHours}h remaining
+                  </span>
                 </div>
               )}
 
@@ -205,7 +177,9 @@ export default function WeekGrid({
                     <span className="calendar-capacity-content">
                       <span className="calendar-capacity-title-row">
                         <span className="calendar-capacity-title">{block.shiftName || block.workType || "Shift"}</span>
-                        {block.workType && <span className="calendar-capacity-project-chip">{block.workType}</span>}
+                        {block.workType && block.workType.trim().toLowerCase() !== (block.shiftName || "").trim().toLowerCase() && (
+                          <span className="calendar-capacity-project-chip">{block.workType}</span>
+                        )}
                       </span>
                       {isAdmin && <span className="calendar-capacity-admin-hint">Tap to reduce</span>}
                       <span className="calendar-capacity-stack">
