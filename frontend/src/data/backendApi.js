@@ -1,4 +1,4 @@
-const BASE_URL = "/api";
+const BASE_URL = "https://diagnostic-epinions-obtaining-density.trycloudflare.com";
 
 async function readResponsePayload(response) {
   const contentType = response.headers.get("content-type") || "";
