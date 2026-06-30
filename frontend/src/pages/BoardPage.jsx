@@ -493,14 +493,16 @@ export default function BoardPage() {
   const pendingHours = pendingClaim?.dateKey === activeDate && pendingClaim?.mode !== "adjust" ? pendingClaim.hours : 0;
   const overBudget = pendingClaim?.mode !== "adjust" && pendingClaim != null && pendingHours > pendingClaim.maxHours;
   const isAdjustingToZero = pendingClaim?.mode === "adjust" && pendingClaim.hours === 0;
-  const reservedBlocks = useMemo(() => {
-    if (!user?.id) return [];
-    return dateKeys.flatMap((dateKey) =>
-      (weekData[dateKey]?.blocks ?? [])
-        .filter((block) => block.myHours > 0)
-        .map((block) => ({ ...block, dateKey }))
-    );
-  }, [dateKeys, weekData, user?.id]);
+ const reservedBlocks = useMemo(() => {
+  if (!user?.id) return [];
+
+  return (weekData[todayKey]?.blocks ?? [])
+    .filter((block) => block.myHours > 0)
+    .map((block) => ({
+      ...block,
+      dateKey: todayKey,
+    }));
+}, [weekData, user?.id]);
 
   // Step 7: the block currently being tracked, plus how much of its claimed
   // hours have been consumed so far — surfaced as a progress bar on the big
@@ -1028,6 +1030,22 @@ export default function BoardPage() {
                     </div>
                   </div>
                   <div className="reserved-timer-clock">{formatSeconds(timerElapsedSeconds)}</div>
+                  <div className="reserved-timer-history">
+    <h4>Recent activity</h4>
+
+  <div className="reserved-history-item">
+    <div className="reserved-history-left">
+        <div className="reserved-history-title">Yesterday</div>
+        <div className="reserved-history-subtitle">
+            Hours successfully reported
+        </div>
+    </div>
+
+    <div className="reserved-history-right">
+        {effectiveReportedHours.toFixed(2)}h
+    </div>
+</div>
+</div>
                   {activeTrackedBlock && (
                     <div className="reserved-timer-progress">
                       <div className="reserved-timer-progress-track">
@@ -1069,7 +1087,7 @@ export default function BoardPage() {
                   </div>
                   <div className="reserved-blocks-list">
                     {reservedBlocks.length === 0 ? (
-                      <div className="reserved-blocks-empty">You have no reserved blocks this week.</div>
+                      <div className="reserved-blocks-empty">You have no reserved blocks this today.</div>
                     ) : (
                       reservedBlocks.map((block) => {
                         const blockBookingId = block.bookings?.find((booking) => booking.isMine)?.id ?? null;

@@ -166,6 +166,27 @@
   font-size: 0.84rem;
   text-align: center;
 }
+.reserved-history-left {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.reserved-history-title {
+    font-weight: 600;
+    font-size: .95rem;
+}
+
+.reserved-history-subtitle {
+    font-size: .8rem;
+    color: rgba(255,255,255,.55);
+}
+
+.reserved-history-right {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: #fff; /* or your theme's primary text color */
+}
 
 .reserved-timer-header {
   display: flex;
