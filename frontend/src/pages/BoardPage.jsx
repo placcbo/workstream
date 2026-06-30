@@ -397,6 +397,22 @@ export default function BoardPage() {
     );
   }, [dateKeys, weekData, user?.id]);
 
+  // Step 7: the block currently being tracked, plus how much of its claimed
+  // hours have been consumed so far — surfaced as a progress bar on the big
+  // timer card itself, filling the space that used to sit empty below the
+  // clock once the old footer moved up into the header.
+  const activeTrackedBlock = useMemo(() => {
+    if (!timerRunning || timerBookingId == null) return null;
+    return reservedBlocks.find((block) => block.bookings?.some((booking) => booking.isMine && booking.id === timerBookingId)) ?? null;
+  }, [reservedBlocks, timerRunning, timerBookingId]);
+
+  const activeTrackedProgressPct = useMemo(() => {
+    if (!activeTrackedBlock || activeTrackedBlock.myHours <= 0) return 0;
+    const banked = timerBookingId != null ? (bookingBanked[timerBookingId] ?? 0) : 0;
+    const liveWorked = banked + timerElapsedSeconds / 3600;
+    return Math.min(100, Math.max(0, (liveWorked / activeTrackedBlock.myHours) * 100));
+  }, [activeTrackedBlock, bookingBanked, timerBookingId, timerElapsedSeconds]);
+
   const pendingBlock = useMemo(() => {
     if (!pendingClaim) return null;
     return weekData[pendingClaim.dateKey]?.blocks.find((block) => block.id === pendingClaim.blockId) ?? null;
@@ -786,6 +802,19 @@ export default function BoardPage() {
                     </div>
                   </div>
                   <div className="reserved-timer-clock">{formatSeconds(timerElapsedSeconds)}</div>
+                  {activeTrackedBlock && (
+                    <div className="reserved-timer-progress">
+                      <div className="reserved-timer-progress-track">
+                        <div
+                          className="reserved-timer-progress-fill"
+                          style={{ width: `${activeTrackedProgressPct}%` }}
+                        />
+                      </div>
+                      <span className="reserved-timer-progress-label">
+                        {Math.max(0, activeTrackedBlock.myHours - (activeTrackedProgressPct / 100) * activeTrackedBlock.myHours).toFixed(2)}h left on {activeTrackedBlock.shiftName || activeTrackedBlock.workType}
+                      </span>
+                    </div>
+                  )}
                   {timerRunning && (
                     <div className="reserved-timer-action reserved-timer-action--stop">
                       <button className="btn btn--ghost reserved-timer-button" onClick={handleStopWorking}>
@@ -830,12 +859,17 @@ export default function BoardPage() {
                         const progressPct = block.myHours > 0
                           ? Math.min(100, Math.max(0, (liveWorkedHours / block.myHours) * 100))
                           : 0;
+                        // Step 8: workType and shiftName are very often the same word
+                        // (e.g. "hubdoc" / "hubdoc") — only show the small eyebrow
+                        // label above the title when it actually adds information.
+                        const displayTitle = block.shiftName || block.workType || "Shift";
+                        const showEyebrow = Boolean(block.workType) && block.workType !== displayTitle;
                         return (
                         <div key={block.id} className={`reserved-block-card reserved-block-card--task ${isCurrentTask ? "reserved-block-card--active" : ""}`}>
                         <div className="reserved-block-card-title-row">
                           <div>
-                            <div className="reserved-block-card-label">{block.workType || "Task"}</div>
-                            <div className="reserved-block-card-title">{block.shiftName || block.workType || "Shift"}</div>
+                            {showEyebrow && <div className="reserved-block-card-label">{block.workType}</div>}
+                            <div className={`reserved-block-card-title ${showEyebrow ? "" : "reserved-block-card-title--standalone"}`}>{displayTitle}</div>
                           </div>
                           <div className="reserved-block-card-meta">
                             <span className={`reserved-block-card-duration ${isCurrentTask ? "reserved-block-card-duration--live" : ""}`}>{remainingHours.toFixed(2)}h</span>
