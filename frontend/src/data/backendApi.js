@@ -124,8 +124,11 @@ export function startTimer(userId, taskName, bookingId, blockId, dateKey) {
   return callApi(`/timer/start`, { userId, taskName, bookingId, blockId, dateKey });
 }
 
-export function stopTimer(userId) {
-  return callApi(`/timer/stop`, { userId });
+export function stopTimer(userId, clientElapsedSeconds = null) {
+  return callApi(`/timer/stop`, {
+    userId,
+    ...(clientElapsedSeconds != null ? { clientElapsedSeconds } : {}),
+  });
 }
 
 export { toDateKey } from "./schedule";

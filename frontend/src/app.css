@@ -1363,6 +1363,85 @@
 }
 
 /* ---------------------------------------------------------------------- */
+/* Toasts (popup notifications, render above modals)                      */
+/* ---------------------------------------------------------------------- */
+
+.toast-stack {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(380px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 0.86rem;
+  font-weight: 500;
+  line-height: 1.4;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+  animation: toast-slide-in 0.18s ease-out;
+}
+
+@keyframes toast-slide-in {
+  from {
+    transform: translateY(-8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.toast--error {
+  background: rgba(193, 80, 46, 0.96);
+  border: 1px solid var(--rust-dim);
+  color: #fff;
+}
+
+.toast--warning {
+  background: rgba(232, 163, 61, 0.96);
+  border: 1px solid var(--amber);
+  color: var(--ink);
+}
+
+.toast--success {
+  background: rgba(61, 140, 125, 0.96);
+  border: 1px solid var(--teal-dim);
+  color: #fff;
+}
+
+.toast-text {
+  flex: 1;
+}
+
+.toast-dismiss {
+  background: transparent;
+  border: none;
+  color: inherit;
+  opacity: 0.8;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.toast-dismiss:hover {
+  opacity: 1;
+}
+
+
+/* ---------------------------------------------------------------------- */
 /* Confirm bar (gauge + booking summary)                                  */
 /* ---------------------------------------------------------------------- */
 

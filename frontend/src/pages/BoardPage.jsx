@@ -67,6 +67,11 @@ export default function BoardPage() {
   const [timerBookingId, setTimerBookingId] = useState(null);
   const [timerBlockId, setTimerBlockId] = useState(null);
   const [timerDateKey, setTimerDateKey] = useState(null);
+  // True while the browser reports no network connection. While offline,
+  // the running timer's display is frozen (no further hours are tracked)
+  // rather than silently continuing to count against a server it can't
+  // reach; see the online/offline effect further down.
+  const [isOffline, setIsOffline] = useState(() => (typeof navigator !== "undefined" ? !navigator.onLine : false));
   // Hours banked from previously-stopped timers, on top of completed-booking
   // hours. Lives entirely on the backend (Store.reportedOverride, keyed by
   // userId) — fetched here, never written to localStorage.
@@ -77,6 +82,26 @@ export default function BoardPage() {
   // "Start timer".
   const [bookingBanked, setBookingBanked] = useState({});
   const [isRefreshingReserved, setIsRefreshingReserved] = useState(false);
+
+  // Popup/toast notifications — used for events the user needs to notice
+  // even if a modal (e.g. the reserved-blocks overlay) is open on top of
+  // the page, which the inline `banner` renders underneath and behind.
+  const [toasts, setToasts] = useState([]);
+  const nextToastId = useRef(1);
+  const pushToast = useCallback((kind, text, durationMs = 7000) => {
+    const id = nextToastId.current++;
+    setToasts((current) => [...current, { id, kind, text }]);
+    if (durationMs) {
+      setTimeout(() => {
+        setToasts((current) => current.filter((toast) => toast.id !== id));
+      }, durationMs);
+    }
+    return id;
+  }, []);
+  const dismissToast = useCallback((id) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+
 
   // Bug fix (Bug 3): clear admin modal state whenever the logged-in user
   // changes (e.g. admin-1 logs out and admin-2 logs in in the same tab).
@@ -361,8 +386,87 @@ export default function BoardPage() {
     }
   }, [timerRunning, dateKeys, user?.id]);
 
+  // Finalize a timer that was paused by a network outage: tell the backend
+  // to bank only the elapsed time captured at the moment the connection
+  // dropped (snapshotSeconds), not however much real time has actually
+  // passed since — the offline gap itself must NOT count as worked time.
+  const handleOfflineAutoStop = useCallback(async (snapshotSeconds) => {
+    if (!user?.id) return;
+    try {
+      const res = await apiStopTimer(user.id, snapshotSeconds);
+      setTimerRunning(false);
+      setTimerStartAt(null);
+      setTimerElapsedSeconds(0);
+      setTimerTaskName("");
+      setTimerBookingId(null);
+      setTimerBlockId(null);
+      setTimerDateKey(null);
+      if (res?.ok) {
+        setBankedHours(res.bankedHours ?? 0);
+        setBookingBanked(res.bookingBanked ?? {});
+      }
+      const refreshedSummary = await fetchUserHoursSummary(dateKeys, user.id);
+      setSummary(refreshedSummary);
+      pushToast(
+        "success",
+        `Back online — ${formatSeconds(Math.round(snapshotSeconds))} reported (tracked before the connection dropped). Start working again to resume.`
+      );
+    } catch (err) {
+      pushToast("warning", "Back online, but couldn't confirm the timer stop with the server — please check your reported hours.");
+    }
+  }, [user?.id, dateKeys, pushToast, formatSeconds]);
+
+  // Track the live elapsed seconds in a ref too, so the offline/online
+  // listeners (which run outside the render cycle) can read the latest
+  // value synchronously without depending on (and re-binding to) state.
+  const timerElapsedSecondsRef = useRef(0);
   useEffect(() => {
-    if (!timerRunning) return undefined;
+    timerElapsedSecondsRef.current = timerElapsedSeconds;
+  }, [timerElapsedSeconds]);
+
+  const offlineSnapshotRef = useRef(null);
+  const offlineToastIdRef = useRef(null);
+
+  useEffect(() => {
+    const handleOffline = () => {
+      setIsOffline(true);
+      if (timerRunning) {
+        offlineSnapshotRef.current = timerElapsedSecondsRef.current;
+        offlineToastIdRef.current = pushToast(
+          "warning",
+          `You're offline — the timer is paused at ${formatSeconds(timerElapsedSecondsRef.current)}. It will stop and report this time once you're back online.`,
+          0
+        );
+      } else {
+        offlineToastIdRef.current = pushToast("warning", "You're offline. Some actions won't work until your connection returns.", 0);
+      }
+    };
+    const handleOnline = () => {
+      setIsOffline(false);
+      if (offlineToastIdRef.current != null) {
+        dismissToast(offlineToastIdRef.current);
+        offlineToastIdRef.current = null;
+      }
+      const snapshot = offlineSnapshotRef.current;
+      offlineSnapshotRef.current = null;
+      if (snapshot != null) {
+        handleOfflineAutoStop(snapshot);
+      } else {
+        pushToast("success", "Back online.");
+      }
+    };
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
+    return () => {
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+    };
+  }, [timerRunning, handleOfflineAutoStop, pushToast, dismissToast, formatSeconds]);
+
+  useEffect(() => {
+    // While offline, freeze the displayed timer instead of letting it keep
+    // counting locally with no way to actually report to the server.
+    if (!timerRunning || isOffline) return undefined;
     const interval = setInterval(() => {
       setTimerElapsedSeconds((current) => {
         const next = current + 1;
@@ -377,7 +481,7 @@ export default function BoardPage() {
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, [timerRunning, handleStopWorking]);
+  }, [timerRunning, isOffline, handleStopWorking]);
 
   const timerButtonText = timerRunning ? "Stop timer" : "Start working";
 
@@ -412,6 +516,42 @@ export default function BoardPage() {
     const liveWorked = banked + timerElapsedSeconds / 3600;
     return Math.min(100, Math.max(0, (liveWorked / activeTrackedBlock.myHours) * 100));
   }, [activeTrackedBlock, bookingBanked, timerBookingId, timerElapsedSeconds]);
+
+  const autoStopInFlightRef = useRef(false);
+
+  // Auto-stop the running timer when either:
+  //   (a) the block's own shift window (startTime–endTime) has passed, or
+  //   (b) the user has fully consumed the hours they reserved on this block
+  //       (myHours) — this is the case from the bug report: a 1h reservation
+  //       whose elapsed time reached 1h while the shift window itself
+  //       (e.g. 08:00–17:00) was nowhere near over.
+  // Either way the timer shouldn't keep ticking silently — stop it, bank
+  // whatever was worked, and tell the user why via a toast (banners render
+  // inline in the page and are hidden behind the reserved-blocks modal).
+  useEffect(() => {
+    if (!timerRunning) {
+      autoStopInFlightRef.current = false;
+      return undefined;
+    }
+    if (!activeTrackedBlock || autoStopInFlightRef.current) return undefined;
+
+    const shiftExpired = isShiftExpired(activeTrackedBlock.dateKey, activeTrackedBlock.endTime, activeTrackedBlock.startTime);
+    const banked = timerBookingId != null ? (bookingBanked[timerBookingId] ?? 0) : 0;
+    const liveWorkedHours = banked + timerElapsedSeconds / 3600;
+    const hoursExhausted = activeTrackedBlock.myHours > 0 && liveWorkedHours >= activeTrackedBlock.myHours;
+
+    if (!shiftExpired && !hoursExhausted) return undefined;
+
+    autoStopInFlightRef.current = true;
+    const label = activeTrackedBlock.shiftName || activeTrackedBlock.workType || "this block";
+    const reason = shiftExpired
+      ? `the shift window (${activeTrackedBlock.startTime}–${activeTrackedBlock.endTime}) has ended`
+      : `you've used all ${activeTrackedBlock.myHours}h reserved on ${label}`;
+    handleStopWorking().then(() => {
+      pushToast("error", `Reservation expired — ${reason}. Timer stopped automatically and your hours were reported. Start working again to continue.`);
+      setBanner({ kind: "error", text: `Reservation expired (${label}) — timer stopped automatically and your hours were reported.` });
+    });
+  }, [timerRunning, activeTrackedBlock, timerElapsedSeconds, timerBookingId, bookingBanked, isShiftExpired, handleStopWorking, pushToast]);
 
   const pendingBlock = useMemo(() => {
     if (!pendingClaim) return null;
@@ -772,7 +912,21 @@ export default function BoardPage() {
 
   return (
     <div className="board-page">
+      {toasts.length > 0 && (
+        <div className="toast-stack" role="status" aria-live="polite">
+          {toasts.map((toast) => (
+            <div key={toast.id} className={`toast toast--${toast.kind}`}>
+              <span className="toast-text">{toast.text}</span>
+              <button className="toast-dismiss" onClick={() => dismissToast(toast.id)} aria-label="Dismiss">
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <Header user={user} onLogout={logout} onShowReservedBlocks={() => setShowReservedBlocks(true)} timerRunning={timerRunning} />
+
 
       <main className="board-main board-main--week">
         {showReservedBlocks && (
@@ -860,7 +1014,9 @@ export default function BoardPage() {
                         const expired = isShiftExpired(block.dateKey, block.endTime, block.startTime);
                         const outsideShiftWindow = !expired && !isNowInShiftWindow(block.dateKey, block.startTime, block.endTime);
                         const willSwitchTimer = timerRunning && !isCurrentTask && !expired && !outsideShiftWindow;
-                        const startDisabledReason = expired
+                        const startDisabledReason = isOffline
+                          ? "You're offline — reconnect to start tracking."
+                          : expired
                           ? "This block has expired."
                           : outsideShiftWindow
                           ? `Cannot start — outside this block's working hours (${block.startTime}–${block.endTime}).`
@@ -902,11 +1058,16 @@ export default function BoardPage() {
                             <button
                               className={
                                 `btn btn--ghost reserved-block-card-start ${
-                                  expired || outsideShiftWindow ? "btn--disabled" : ""
+                                  expired || outsideShiftWindow || isOffline ? "btn--disabled" : ""
                                 }`
                               }
-                              disabled={!timerRunning && expired}
+                              disabled={(!timerRunning && expired) || isOffline}
                               onClick={async () => {
+                                if (isOffline) {
+                                  pushToast("warning", "You're offline — reconnect before starting the timer.");
+                                  return;
+                                }
+
                                 if (expired) {
                                   setBanner({
                                     kind: "error",

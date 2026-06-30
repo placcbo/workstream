@@ -746,6 +746,14 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Hours must be 0 or more."})
 		return
 	}
+	if activeTimer, ok := store.timers[payload.UserID]; ok && activeTimer.BookingID == payload.BookingID {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Stop the timer before changing or cancelling this reservation."})
+		return
+	}
+	if worked := store.bookingBanked[payload.BookingID]; worked > 0 && float64(payload.Hours) < worked {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("You've already worked %.2fh on this block — it can't be reduced below that.", worked)})
+		return
+	}
 	if payload.Hours == 0 {
 		original := *target
 		next := make([]Booking, 0, len(store.bookings)-1)
@@ -822,6 +830,14 @@ func handleCancelBooking(w http.ResponseWriter, r *http.Request) {
 	target := store.bookings[idx]
 	if target.UserID != payload.UserID {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Not your booking."})
+		return
+	}
+	if activeTimer, ok := store.timers[payload.UserID]; ok && activeTimer.BookingID == payload.BookingID {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Stop the timer before changing or cancelling this reservation."})
+		return
+	}
+	if worked := store.bookingBanked[payload.BookingID]; worked > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("You've already worked %.2fh on this block — it can't be cancelled.", worked)})
 		return
 	}
 	block := Block{}
@@ -1084,7 +1100,8 @@ func handleStartTimer(w http.ResponseWriter, r *http.Request) {
 // form the user's effective reported hours).
 func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		UserID string `json:"userId"`
+		UserID                string   `json:"userId"`
+		ClientElapsedSeconds  *float64 `json:"clientElapsedSeconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
@@ -1098,6 +1115,14 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
+	// If the client supplies an explicit elapsed-seconds snapshot (e.g. it
+	// went offline partway through and is now finalizing the stop), trust
+	// whichever is SMALLER — this lets a network outage be excluded from
+	// the reported time instead of silently banking the full wall-clock gap,
+	// while never letting a client-supplied value inflate the real elapsed.
+	if req.ClientElapsedSeconds != nil && *req.ClientElapsedSeconds >= 0 && *req.ClientElapsedSeconds < elapsedSeconds {
+		elapsedSeconds = *req.ClientElapsedSeconds
+	}
 	cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
 	addedHours := math.Round((cappedSeconds/3600)*100) / 100
 	// Bank elapsed hours immediately, even for booking-tied timers — partial
