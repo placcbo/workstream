@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useCallback, useEffect, useMemo, u
 import {
   fetchSession,
   loginSession,
+  registerAccount,
   logoutSession,
   fetchWorkTypeAccess,
   grantWorkTypeAccess as apiGrantWorkTypeAccess,
@@ -242,24 +243,12 @@ export function AuthProvider({ children }) {
   const clearCustomWorkTypes = useCallback(() => setCustomWorkTypes([]), []);
 
   const login = useCallback(
-    async (accountId) => {
+    async ({ email, password }) => {
       setIsAuthenticating(true);
-      const account = MOCK_ACCOUNTS.find((a) => a.id === accountId);
-      if (!account) {
-        setIsAuthenticating(false);
-        return null;
-      }
       try {
         // Backend resolves grantedWorkTypes (defaultWorkTypes + any grants)
         // and hands back a sessionId — the session itself lives server-side.
-        const res = await loginSession({
-          id: account.id,
-          name: account.name,
-          email: account.email,
-          avatarUrl: account.avatarUrl,
-          role: account.role,
-          defaultWorkTypes: Array.isArray(account.defaultWorkTypes) ? account.defaultWorkTypes : [],
-        });
+        const res = await loginSession({ email, password });
         sessionIdRef.current = res.sessionId;
         try {
           localStorage.setItem(SESSION_STORAGE_KEY, res.sessionId);
@@ -270,9 +259,24 @@ export function AuthProvider({ children }) {
         setIsAuthenticating(false);
         return res.user;
       } catch (err) {
-        console.error("Login failed — backend unreachable", err);
+        console.error("Login failed", err);
         setIsAuthenticating(false);
-        return null;
+        throw err;
+      }
+    },
+    []
+  );
+
+  const register = useCallback(
+    async ({ name, email, password, role = "user", inviteCode = "" }) => {
+      setIsAuthenticating(true);
+      try {
+        const result = await registerAccount({ name, email, password, role, inviteCode });
+        setIsAuthenticating(false);
+        return result;
+      } catch (err) {
+        setIsAuthenticating(false);
+        throw err;
       }
     },
     []
@@ -298,6 +302,7 @@ export function AuthProvider({ children }) {
       isAuthenticating,
       authLoading,
       login,
+      register,
       logout,
       workTypeAccess,
       grantWorkTypeAccess,
@@ -307,7 +312,7 @@ export function AuthProvider({ children }) {
       removeCustomWorkType,
       clearCustomWorkTypes,
     }),
-    [user, isAuthenticating, authLoading, login, logout, workTypeAccess, grantWorkTypeAccess, revokeWorkTypeAccess, customWorkTypes, addCustomWorkType, removeCustomWorkType, clearCustomWorkTypes]
+    [user, isAuthenticating, authLoading, login, register, logout, workTypeAccess, grantWorkTypeAccess, revokeWorkTypeAccess, customWorkTypes, addCustomWorkType, removeCustomWorkType, clearCustomWorkTypes]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

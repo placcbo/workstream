@@ -1087,7 +1087,7 @@ export default function BoardPage() {
                   </div>
                   <div className="reserved-blocks-list">
                     {reservedBlocks.length === 0 ? (
-                      <div className="reserved-blocks-empty">You have no reserved blocks this today.</div>
+                      <div className="reserved-blocks-empty">You have no reserved blocks today.</div>
                     ) : (
                       reservedBlocks.map((block) => {
                         const blockBookingId = block.bookings?.find((booking) => booking.isMine)?.id ?? null;

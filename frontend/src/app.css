@@ -756,8 +756,6 @@
 .app-brand-button--active.btn--ghost {
   color: #56d1ff;
 }
-  width: 100%;
-}
 
 /* ---------------------------------------------------------------------- */
 /* Login page                                                             */
@@ -773,6 +771,88 @@
   text-align: center;
 }
 
+.login-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.login-mode-button {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--paper-dim);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.login-mode-button--active {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--line);
+  color: var(--paper);
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+
+.auth-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--paper-dim);
+}
+
+.auth-input {
+  width: 100%;
+  background: rgba(12, 17, 24, 0.4);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  color: var(--paper);
+  box-sizing: border-box;
+}
+
+.auth-input:focus {
+  outline: none;
+  border-color: var(--amber);
+}
+
+.auth-submit {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.auth-message {
+  margin: 12px 0 0;
+  font-size: 0.74rem;
+  color: var(--paper);
+}
+
+.auth-message--error {
+  color: #ff9e9e;
+}
+
+.auth-message--success {
+  color: #8ef0d5;
+}
+
+.auth-hint {
+  font-size: 0.66rem;
+  color: var(--paper-dim);
+}
 .login-mark {
   display: inline-flex;
   margin-bottom: 14px;

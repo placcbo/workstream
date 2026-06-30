@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -24,6 +26,16 @@ type Block struct {
 	WorkType        string `json:"workType"`
 	OwnerID         string `json:"ownerId,omitempty"`
 	MaxHoursPerUser int    `json:"maxHoursPerUser,omitempty"`
+}
+
+type User struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Email            string   `json:"email"`
+	PasswordHash     string   `json:"-"`
+	AvatarURL        string   `json:"avatarUrl,omitempty"`
+	Role             string   `json:"role"`
+	DefaultWorkTypes []string `json:"defaultWorkTypes"`
 }
 
 type Booking struct {
@@ -76,11 +88,13 @@ type Store struct {
 	bookings         []Booking
 	projects         map[string][]string // Projects per admin: { adminId: [projectNames...] }
 	workTypeAccess   map[string][]string // { workType: [normalized emails...] } — extra grants beyond defaultWorkTypes
+	users            map[string]User     // keyed by normalized email
 	timers           map[string]*Timer   // keyed by userID — the user's currently-running timer, if any
 	reportedOverride map[string]float64  // keyed by userID — hours banked from stopped timers, on top of completed-booking hours
 	bookingBanked    map[string]float64  // keyed by bookingID — hours already banked into reportedOverride for that specific booking, so completed-shift hours aren't double-counted
 	nextBlockID      int
 	nextBookingID    int
+	nextUserID       int
 }
 
 var store = &Store{
@@ -88,17 +102,21 @@ var store = &Store{
 	bookings:         make([]Booking, 0),
 	projects:         make(map[string][]string),
 	workTypeAccess:   make(map[string][]string),
+	users:            make(map[string]User),
 	timers:           make(map[string]*Timer),
 	reportedOverride: make(map[string]float64),
 	bookingBanked:    make(map[string]float64),
 	nextBlockID:      100,
 	nextBookingID:    100,
+	nextUserID:       1,
 }
 
 // MaxPlausibleTimerHours mirrors the client-side cap: if a timer has been
 // running longer than this (e.g. the tab was closed and reopened days
 // later), we don't trust the elapsed time as real tracked work.
 const maxPlausibleTimerHours = 12
+
+const defaultAdminInviteCode = "workstream-admin-2026"
 
 const dayStartHour = 8
 const slotsPerDay = 24
@@ -265,6 +283,15 @@ func remainingForBlock(block Block) int {
 // so grants are matched consistently regardless of how the email was typed.
 func normalizeEmail(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func hashPassword(password string) string {
+	sum := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(sum[:])
+}
+
+func passwordMatches(hash, password string) bool {
+	return hashPassword(password) == hash
 }
 
 func blockWorkType(dateKey, blockID string) string {
@@ -716,7 +743,6 @@ func handleReleaseHoursRecurring(w http.ResponseWriter, r *http.Request) {
 		"totalBlocksCreated": totalBlocksCreated,
 		"hoursPerDate":       baseHoursPerDate,
 		"dateKeys":           dateKeys,
-
 	})
 }
 
@@ -1262,8 +1288,8 @@ func handleStartTimer(w http.ResponseWriter, r *http.Request) {
 // form the user's effective reported hours).
 func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		UserID                string   `json:"userId"`
-		ClientElapsedSeconds  *float64 `json:"clientElapsedSeconds"`
+		UserID               string   `json:"userId"`
+		ClientElapsedSeconds *float64 `json:"clientElapsedSeconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
@@ -1359,39 +1385,132 @@ func resolveGrantedWorkTypesForEmail(email string, defaultWorkTypes []string) []
 	return out
 }
 
-// POST /api/session/login { account: sessionAccount } — stores the session
-// server-side and returns a sessionId plus the resolved user (with
-// grantedWorkTypes filled in). The frontend persists only the sessionId.
-func handleSessionLogin(w http.ResponseWriter, r *http.Request) {
+// POST /api/register creates a new user in memory.
+func handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Account sessionAccount `json:"account"`
+		Name       string `json:"name"`
+		Email      string `json:"email"`
+		Password   string `json:"password"`
+		Role       string `json:"role"`
+		InviteCode string `json:"inviteCode,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
 		return
 	}
-	if req.Account.ID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "account.id required"})
+
+	name := strings.TrimSpace(req.Name)
+	email := normalizeEmail(req.Email)
+	password := req.Password
+	role := strings.ToLower(strings.TrimSpace(req.Role))
+	if role == "" {
+		role = "user"
+	}
+	if name == "" || email == "" || password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name, email, and password are required"})
 		return
 	}
-	sessionID := fmt.Sprintf("sess-%s-%d", req.Account.ID, time.Now().UnixNano())
+	if role != "user" && role != "admin" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "role must be 'user' or 'admin'"})
+		return
+	}
+	if role == "admin" && req.InviteCode != defaultAdminInviteCode {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid invite code"})
+		return
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if _, exists := store.users[email]; exists {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "email already registered"})
+		return
+	}
+
+	user := User{
+		ID:               fmt.Sprintf("user-%d", store.nextUserID),
+		Name:             name,
+		Email:            email,
+		PasswordHash:     hashPassword(password),
+		Role:             role,
+		DefaultWorkTypes: []string{},
+	}
+	store.nextUserID++
+	store.users[email] = user
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user": map[string]any{
+			"id":               user.ID,
+			"name":             user.Name,
+			"email":            user.Email,
+			"avatarUrl":        user.AvatarURL,
+			"role":             user.Role,
+			"defaultWorkTypes": user.DefaultWorkTypes,
+			"grantedWorkTypes": []string{},
+		},
+	})
+}
+
+// POST /api/session/login { email, password } — validates credentials and
+// creates a session for the stored user.
+func handleSessionLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Account  sessionAccount `json:"account"`
+		Email    string         `json:"email"`
+		Password string         `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
+		return
+	}
+
+	var account sessionAccount
+	if req.Account.ID != "" {
+		account = req.Account
+	} else {
+		email := normalizeEmail(req.Email)
+		password := req.Password
+		if email == "" || password == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "email and password are required"})
+			return
+		}
+
+		store.mu.Lock()
+		user, exists := store.users[email]
+		store.mu.Unlock()
+		if !exists || !passwordMatches(user.PasswordHash, password) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid email or password"})
+			return
+		}
+
+		account = sessionAccount{
+			ID:               user.ID,
+			Name:             user.Name,
+			Email:            user.Email,
+			AvatarURL:        user.AvatarURL,
+			Role:             user.Role,
+			DefaultWorkTypes: user.DefaultWorkTypes,
+		}
+	}
+
+	sessionID := fmt.Sprintf("sess-%s-%d", account.ID, time.Now().UnixNano())
 	activeSessions.mu.Lock()
-	activeSessions.m[sessionID] = req.Account
+	activeSessions.m[sessionID] = account
 	activeSessions.mu.Unlock()
 
 	store.mu.Lock()
-	granted := resolveGrantedWorkTypesForEmail(req.Account.Email, req.Account.DefaultWorkTypes)
+	granted := resolveGrantedWorkTypesForEmail(account.Email, account.DefaultWorkTypes)
 	store.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sessionId": sessionID,
 		"user": map[string]any{
-			"id":               req.Account.ID,
-			"name":             req.Account.Name,
-			"email":            req.Account.Email,
-			"avatarUrl":        req.Account.AvatarURL,
-			"role":             req.Account.Role,
-			"defaultWorkTypes": req.Account.DefaultWorkTypes,
+			"id":               account.ID,
+			"name":             account.Name,
+			"email":            account.Email,
+			"avatarUrl":        account.AvatarURL,
+			"role":             account.Role,
+			"defaultWorkTypes": account.DefaultWorkTypes,
 			"grantedWorkTypes": granted,
 		},
 	})
@@ -1466,6 +1585,7 @@ func main() {
 	http.HandleFunc("/api/timer", withCORS(handleTimerRouter))
 	http.HandleFunc("/api/timer/start", withCORS(handleStartTimer))
 	http.HandleFunc("/api/timer/stop", withCORS(handleStopTimer))
+	http.HandleFunc("/api/register", withCORS(handleRegister))
 	http.HandleFunc("/api/session", withCORS(handleSessionRouter))
 	http.HandleFunc("/api/session/login", withCORS(handleSessionLogin))
 	http.HandleFunc("/api/session/logout", withCORS(handleSessionLogout))

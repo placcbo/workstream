@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { adjustReleasedHours, fetchWeekSchedule, releaseHours, reserveHours, updateBookingHours } from "./mockApi.js";
+import { registerAccount } from "./backendApi.js";
 
 test("zero-hour adjustment cancels the reservation", async () => {
   const dateKey = "2026-06-30";
@@ -96,6 +97,24 @@ test("fetchWeekSchedule only returns blocks for projects the user has been grant
 
   const both = await fetchWeekSchedule([dateKey], "user-x", false, ["Extraction", "Cooking"]);
   assert.equal(both[dateKey].blocks.length, 2);
+});
+
+test("registerAccount surfaces backend invite-code errors immediately", async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async () =>
+      new Response(JSON.stringify({ error: "invalid invite code" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    await assert.rejects(
+      () => registerAccount({ name: "Bad Admin", email: "bad@example.com", password: "secret", role: "admin", inviteCode: "wrong-code" }),
+      /invalid invite code/
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test("admin sees only their own released blocks", async () => {

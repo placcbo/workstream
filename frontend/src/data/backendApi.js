@@ -1,17 +1,42 @@
 const BASE_URL = "/api";
 
+async function readResponsePayload(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+  const text = await response.text();
+  return text ? text : null;
+}
+
 async function callApi(path, body, method = "POST") {
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
     headers: { "Content-Type": "application/json" },
     body: body != null ? JSON.stringify(body) : undefined,
   });
-  return response.json();
+
+  const payload = await readResponsePayload(response);
+  if (!response.ok) {
+    const errorMessage = payload && typeof payload === "object" && payload.error ? payload.error : typeof payload === "string" && payload ? payload : `Request failed with status ${response.status}`;
+    const error = new Error(errorMessage);
+    error.status = response.status;
+    throw error;
+  }
+
+  return payload;
 }
 
 async function getApi(path) {
   const response = await fetch(`${BASE_URL}${path}`);
-  return response.json();
+  const payload = await readResponsePayload(response);
+  if (!response.ok) {
+    const errorMessage = payload && typeof payload === "object" && payload.error ? payload.error : typeof payload === "string" && payload ? payload : `Request failed with status ${response.status}`;
+    const error = new Error(errorMessage);
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
 }
 
 export function fetchWeekRange(anchorDate) {
@@ -122,8 +147,12 @@ export function cancelBooking(bookingId, userId) {
 }
 
 // ── Session (replaces localStorage "loggedInUser") ────────────────────────
-export function loginSession(account) {
-  return callApi(`/session/login`, { account });
+export function registerAccount({ name, email, password, role = "user", inviteCode = "" }) {
+  return callApi(`/register`, { name, email, password, role, inviteCode });
+}
+
+export function loginSession({ email, password }) {
+  return callApi(`/session/login`, { email, password });
 }
 
 export function fetchSession(sessionId) {
@@ -163,4 +192,4 @@ export function stopTimer(userId, clientElapsedSeconds = null) {
   });
 }
 
-export { toDateKey } from "./schedule";
+export { toDateKey } from "./schedule.js";
