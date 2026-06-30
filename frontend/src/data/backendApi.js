@@ -36,6 +36,15 @@ export function fetchAdminCapacitySummary(dateKeys) {
   return callApi(`/admin-capacity-summary`, { dateKeys });
 }
 
+// ── Projects (replaces a hardcoded http://localhost:8080 fetch in AuthContext.jsx) ──
+export function fetchProjects(adminId) {
+  return getApi(`/projects?adminId=${encodeURIComponent(adminId)}`);
+}
+
+export function addProject(adminId, name) {
+  return callApi(`/projects`, { adminId, name });
+}
+
 export function releaseHours(dateKey, totalHours, blockSize, startSlot = 0, shiftName = "Extraction Experienced", startTime = "08:00", endTime = "17:00", workType = "Extraction", ownerId = "", maxHoursPerUser = 8) {
   return callApi(`/release-hours`, {
     dateKey,

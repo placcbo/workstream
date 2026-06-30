@@ -55,6 +55,35 @@ export function deriveBookingStatus(dateKey, slotIndex, now = new Date()) {
   return slotEndDateTime(dateKey, slotIndex) <= now ? BOOKING_STATUS.COMPLETED : BOOKING_STATUS.RESERVED;
 }
 
+/**
+ * The real calendar Date+time a shift window (startTime -> endTime, e.g.
+ * "08:00" -> "17:00") ends at on `dateKey`. Unlike `slotEndDateTime`, this
+ * does NOT depend on a block's `totalHours` at all — `totalHours` is pooled
+ * capacity (can be 50, 200, anything) and is completely decoupled from how
+ * long the actual shift window is. If `endTime` is <= `startTime` the shift
+ * is treated as rolling past midnight into the next calendar day (mirrors
+ * the overnight handling in `assignBlockLanes`).
+ */
+export function shiftEndDateTime(dateKey, startTime, endTime) {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  const [startHour, startMin] = (startTime ?? "08:00").split(":").map(Number);
+  const [endHour, endMin] = (endTime ?? "17:00").split(":").map(Number);
+  const startMins = (startHour || 0) * 60 + (startMin || 0);
+  const endMins = (endHour || 0) * 60 + (endMin || 0);
+  const dayOffset = endMins <= startMins ? 1 : 0;
+  return new Date(y, m - 1, d + dayOffset, endHour || 0, endMin || 0, 0, 0);
+}
+
+/**
+ * Derive RESERVED vs COMPLETED for a booking using the block's real
+ * startTime/endTime shift window, instead of `totalHours`. This is the
+ * correct completion check post-AdminReleasePanel redesign, where
+ * `totalHours` is pooled capacity, not shift duration.
+ */
+export function deriveShiftBookingStatus(dateKey, startTime, endTime, now = new Date()) {
+  return shiftEndDateTime(dateKey, startTime, endTime) <= now ? BOOKING_STATUS.COMPLETED : BOOKING_STATUS.RESERVED;
+}
+
 /** Format a Date as YYYY-MM-DD for use as a work_date key. */
 export function toDateKey(date) {
   const y = date.getFullYear();

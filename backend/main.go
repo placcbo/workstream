@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -143,6 +144,56 @@ func deriveBookingStatus(dateKey string, slotIndex int) string {
 	return "reserved"
 }
 
+// parseTimeOfDay parses an "HH:MM" string into hour/minute, defaulting to
+// 8:00 (the work-day start) if the value is missing or malformed.
+func parseTimeOfDay(value string) (int, int) {
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 {
+		return dayStartHour, 0
+	}
+	hour, err1 := strconv.Atoi(parts[0])
+	minute, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return dayStartHour, 0
+	}
+	return hour, minute
+}
+
+// shiftEndDateTime is the real calendar Date+time a shift window
+// (startTime -> endTime, e.g. "08:00" -> "17:00") ends at on `dateKey`.
+// Unlike slotEndDateTime, this does NOT depend on a block's TotalHours at
+// all — TotalHours is pooled capacity (can be 50, 200, anything) and is
+// completely decoupled from how long the actual shift window is. If
+// endTime is <= startTime the shift is treated as rolling past midnight
+// into the next calendar day.
+func shiftEndDateTime(dateKey, startTime, endTime string) time.Time {
+	base, err := parseDateKey(dateKey)
+	if err != nil {
+		return time.Time{}
+	}
+	startHour, startMin := parseTimeOfDay(startTime)
+	endHour, endMin := parseTimeOfDay(endTime)
+	startMins := startHour*60 + startMin
+	endMins := endHour*60 + endMin
+	dayOffset := 0
+	if endMins <= startMins {
+		dayOffset = 1
+	}
+	return time.Date(base.Year(), base.Month(), base.Day()+dayOffset, endHour, endMin, 0, 0, time.Local)
+}
+
+// deriveShiftBookingStatus derives RESERVED vs COMPLETED for a booking
+// using the block's real startTime/endTime shift window, instead of
+// TotalHours. This is the correct completion check post-AdminReleasePanel
+// redesign, where TotalHours is pooled capacity, not shift duration.
+func deriveShiftBookingStatus(dateKey, startTime, endTime string) string {
+	now := time.Now()
+	if !shiftEndDateTime(dateKey, startTime, endTime).After(now) {
+		return "completed"
+	}
+	return "reserved"
+}
+
 func blockEndSlot(block Block) int {
 	return block.StartSlot + int(math.Max(1, math.Ceil(float64(block.TotalHours)))) - 1
 }
@@ -249,7 +300,7 @@ func serializeBlock(block Block, currentUserID string) BlockResponse {
 		bookingsResp = append(bookingsResp, BookingStatus{
 			Booking: booking,
 			IsMine:  booking.UserID == currentUserID,
-			Status:  deriveBookingStatus(booking.DateKey, blockEndSlot(block)),
+			Status:  deriveShiftBookingStatus(booking.DateKey, block.StartTime, block.EndTime),
 		})
 	}
 	remainingHours := int(math.Max(0, float64(block.TotalHours-reservedHours)))
@@ -399,9 +450,8 @@ func handleUserHoursSummary(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		endSlot := blockEndSlot(block)
 		reservedHours += booking.Hours
-		if deriveBookingStatus(booking.DateKey, endSlot) == "completed" {
+		if deriveShiftBookingStatus(booking.DateKey, block.StartTime, block.EndTime) == "completed" {
 			reportedHours += booking.Hours
 		}
 	}
@@ -528,6 +578,19 @@ func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
 		}
 		if normalizedTotal < reserved {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't reduce below %dh — that's already claimed on this block.", reserved)})
+			return
+		}
+		// Bug fix: changing a block's workType after users have already
+		// claimed hours on it silently orphans their bookings —
+		// handleWeekSchedule filters blocks by the project(s) a user has
+		// been granted, so a claimant without access to the NEW workType
+		// would stop seeing a block they still have hours reserved on,
+		// while those hours still count against their day in
+		// handleUserHoursSummary. Reassigning the project is only safe
+		// once nobody has claimed anything from this block yet.
+		trimmedWorkType := strings.TrimSpace(payload.WorkType)
+		if trimmedWorkType != "" && trimmedWorkType != block.WorkType && reserved > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't change the project — %dh are already claimed on this block under %q.", reserved, block.WorkType)})
 			return
 		}
 		current[i].TotalHours = normalizedTotal
@@ -757,7 +820,7 @@ func handleCancelBooking(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if deriveBookingStatus(target.DateKey, blockEndSlot(block)) == "completed" {
+	if deriveShiftBookingStatus(target.DateKey, block.StartTime, block.EndTime) == "completed" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Can't cancel a shift that already happened."})
 		return
 	}
@@ -950,7 +1013,18 @@ func handleGetTimer(w http.ResponseWriter, r *http.Request) {
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
 	if elapsedSeconds > maxPlausibleTimerHours*3600 {
 		addedHours := math.Round(maxPlausibleTimerHours*10) / 10
-		store.reportedOverride[userID] += addedHours
+		// Bug fix: only bank timer hours for ad-hoc tracking (no BookingID).
+		// A timer tied to a specific booking tracks time against a shift
+		// whose FULL reserved hours already get counted in
+		// handleUserHoursSummary once that shift's real end time passes
+		// (deriveShiftBookingStatus). Banking the timer's elapsed hours on
+		// top of that double-counts the same shift once it naturally
+		// completes — this only mattered as a workaround back when
+		// completion was derived from totalHours and effectively never
+		// fired on its own.
+		if timer.BookingID == "" {
+			store.reportedOverride[userID] += addedHours
+		}
 		delete(store.timers, userID)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"timer":          nil,
@@ -1015,7 +1089,13 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
 	cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
 	addedHours := math.Round((cappedSeconds/3600)*10) / 10
-	store.reportedOverride[req.UserID] += addedHours
+	// Bug fix: see handleGetTimer for the same reasoning — only bank
+	// elapsed hours for timers not tied to a specific booking, so a
+	// completed shift's reserved hours don't get counted twice (once via
+	// the timer-banked override, once via the booking itself completing).
+	if timer.BookingID == "" {
+		store.reportedOverride[req.UserID] += addedHours
+	}
 	delete(store.timers, req.UserID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          true,

@@ -1318,11 +1318,26 @@
 
 .mini-month,
 .calendar-layers,
-.time-insights {
+.time-insights,
+.board-rail-gauge {
   background: var(--ledger-bg-raised);
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 16px 16px 18px;
+}
+
+.board-rail-gauge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.board-rail-gauge-label {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.86rem;
+  letter-spacing: -0.01em;
 }
 
 .mini-month-header {
@@ -2104,6 +2119,12 @@
   color: #fff7ef;
 }
 
+.calendar-capacity-block--completed {
+  background: rgba(121, 199, 221, 0.32);
+  color: #d8eff5;
+  opacity: 0.8;
+}
+
 .calendar-capacity-block--full {
   background: rgba(71, 91, 83, 0.72);
 }
@@ -2183,6 +2204,24 @@
 
 .calendar-capacity-times {
   opacity: 0.78;
+}
+
+.calendar-capacity-cancel {
+  display: inline-flex;
+  align-self: flex-start;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #fbd0c4;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  margin-top: 1px;
+}
+
+.calendar-capacity-cancel:hover {
+  color: #ffe3da;
 }
 
 .calendar-capacity-edge {

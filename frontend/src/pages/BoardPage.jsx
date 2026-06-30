@@ -20,6 +20,7 @@ import Header from "../components/Header";
 import MiniMonth from "../components/MiniMonth";
 import CalendarLayers from "../components/CalendarLayers";
 import TimeInsights from "../components/TimeInsights";
+import HourGauge from "../components/HourGauge";
 import WeekGrid from "../components/WeekGrid";
 import AdminReleasePanel from "../components/AdminReleasePanel";
 import AdminProjectsAndUsers from "../components/AdminProjectsAndUsers";
@@ -889,6 +890,16 @@ export default function BoardPage() {
             todayKey={todayKey}
           />
           <CalendarLayers visibleLayers={visibleLayers} onToggle={handleToggleLayer} />
+          {/* Bug fix: totalCommittedForActiveDate was being computed but
+              HourGauge was never imported/rendered anywhere — surface it
+              here next to the date picker so users can see today's 8h/day
+              fill at a glance, live-updating with any in-progress claim. */}
+          {!isAdmin && (
+            <div className="board-rail-gauge">
+              <span className="board-rail-gauge-label">{formatDateHeading(activeDate)}</span>
+              <HourGauge committedHours={totalCommittedForActiveDate} pendingHours={pendingHours} />
+            </div>
+          )}
           <TimeInsights
             reportedHours={effectiveReportedHours}
             reservedHours={summary.reservedHours}

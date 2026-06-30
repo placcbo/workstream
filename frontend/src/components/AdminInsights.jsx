@@ -76,7 +76,15 @@ function DayBars({ dateKeys, weekData, projectFilter }) {
         ? blocks.filter((b) => b.workType === projectFilter)
         : blocks;
       const rel = filtered.reduce((s, b) => s + b.totalHours, 0);
+      const cls = filtered.reduce((s, b) => s + (b.reservedHours ?? 0), 0);
+      // Bug fix: this only considered `rel` (released) as the y-axis
+      // ceiling. If a block's claimed hours exceed its released hours —
+      // e.g. an admin uses adjustReleasedHours to shrink totalHours down to
+      // exactly what's already claimed — the claimed bar would render
+      // taller than 100% and overflow the track. Scale against whichever
+      // is larger.
       if (rel > m) m = rel;
+      if (cls > m) m = cls;
     });
     return m;
   }, [dateKeys, weekData, projectFilter]);

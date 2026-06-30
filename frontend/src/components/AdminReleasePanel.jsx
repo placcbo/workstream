@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
 
+const STANDARD_SHIFT_TIMES = { startTime: "08:00", endTime: "17:00" };
+
 function getDefaultTimesForDate(dateKey) {
-  if (!dateKey) return { startTime: "08:00", endTime: "17:00" };
-  const [year, month, day] = dateKey.split("-").map(Number);
-  const date = new Date(year, month - 1, day);
-  return date.getDay() === 6
-    ? { startTime: "14:00", endTime: "22:00" }
-    : { startTime: "08:00", endTime: "17:00" };
+  // All days use the same default shift window — Saturday/Sunday are not
+  // treated specially.
+  return STANDARD_SHIFT_TIMES;
 }
 
 function fillClass(pct) {

@@ -12,7 +12,7 @@ import {
   buildWeekRange,
   toDateKey,
   BOOKING_STATUS,
-  deriveBookingStatus,
+  deriveShiftBookingStatus,
   slotIndexToLabel,
   MAX_HOURS_PER_DAY,
 } from "./schedule.js";
@@ -102,7 +102,7 @@ function serializeBlock(block, currentUserId) {
     bookings: blockBookings.map((booking) => ({
       ...booking,
       isMine: booking.userId === currentUserId,
-      status: deriveBookingStatus(booking.dateKey, endSlot),
+      status: deriveShiftBookingStatus(booking.dateKey, block.startTime, block.endTime),
     })),
   };
 }
@@ -204,9 +204,8 @@ export function fetchUserHoursSummary(dateKeys, userId) {
   let reservedHours = 0;
   userBookings.forEach((booking) => {
     const block = (releaseBlocks.get(booking.dateKey) ?? []).find((candidate) => candidate.id === booking.blockId);
-    const endSlot = block ? blockEndSlot(block) : 0;
     reservedHours += booking.hours;
-    if (deriveBookingStatus(booking.dateKey, endSlot) === BOOKING_STATUS.COMPLETED) {
+    if (deriveShiftBookingStatus(booking.dateKey, block?.startTime, block?.endTime) === BOOKING_STATUS.COMPLETED) {
       reportedHours += booking.hours;
     }
   });
@@ -255,6 +254,21 @@ export function adjustReleasedHours(dateKey, blockId, totalHours, shiftName, sta
     return delay({
       ok: false,
       error: `Can't reduce below ${reserved}h — that's already claimed on this block.`,
+    });
+  }
+
+  // Bug fix: changing a block's workType after users have already claimed
+  // hours on it silently orphans their bookings — fetchWeekSchedule filters
+  // blocks by the project(s) a user has been granted, so a claimant without
+  // access to the NEW workType would stop seeing a block they still have
+  // hours reserved on, while those hours still count against their day in
+  // fetchUserHoursSummary. Reassigning the project is only safe once nobody
+  // has claimed anything from this block yet.
+  const trimmedWorkType = typeof workType === "string" ? workType.trim() : "";
+  if (trimmedWorkType && trimmedWorkType !== target.workType && reserved > 0) {
+    return delay({
+      ok: false,
+      error: `Can't change the project — ${reserved}h are already claimed on this block under "${target.workType}".`,
     });
   }
 
@@ -360,8 +374,7 @@ export function cancelBooking(bookingId, userId) {
   if (target.userId !== userId) return delay({ ok: false, error: "Not your booking." });
 
   const block = (releaseBlocks.get(target.dateKey) ?? []).find((candidate) => candidate.id === target.blockId);
-  const endSlot = block ? blockEndSlot(block) : 0;
-  if (deriveBookingStatus(target.dateKey, endSlot) === BOOKING_STATUS.COMPLETED) {
+  if (deriveShiftBookingStatus(target.dateKey, block?.startTime, block?.endTime) === BOOKING_STATUS.COMPLETED) {
     return delay({ ok: false, error: "Can't cancel a shift that already happened." });
   }
 

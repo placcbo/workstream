@@ -6,6 +6,8 @@ import {
   fetchWorkTypeAccess,
   grantWorkTypeAccess as apiGrantWorkTypeAccess,
   revokeWorkTypeAccess as apiRevokeWorkTypeAccess,
+  fetchProjects,
+  addProject as apiAddProject,
 } from "../data/backendApi";
 
 // ---------------------------------------------------------------------------
@@ -180,11 +182,8 @@ export function AuthProvider({ children }) {
     let cancelled = false;
     const doFetch = async () => {
       try {
-        const res = await fetch(`http://localhost:8080/api/projects?adminId=${user.id}`);
-        if (res.ok) {
-          const projects = await res.json();
-          if (!cancelled) setCustomWorkTypes(projects || []);
-        }
+        const projects = await fetchProjects(user.id);
+        if (!cancelled) setCustomWorkTypes(projects || []);
       } catch (err) {
         console.error("Failed to fetch projects from backend", err);
       }
@@ -219,28 +218,22 @@ export function AuthProvider({ children }) {
   }, []);
 
   /** Add custom work type for current admin - sends to backend */
-  const addCustomWorkType = useCallback((name) => {
-    const trimmedName = typeof name === "string" ? name.trim() : "";
-    if (!trimmedName || !user?.id) {
-      console.warn("Cannot add project: name or user.id missing", { name, userId: user?.id });
-      return;
-    }
-    fetch("http://localhost:8080/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ adminId: user.id, name: trimmedName })
-    })
-      .then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then(projects => {
+  const addCustomWorkType = useCallback(
+    async (name) => {
+      const trimmedName = typeof name === "string" ? name.trim() : "";
+      if (!trimmedName || !user?.id) {
+        console.warn("Cannot add project: name or user.id missing", { name, userId: user?.id });
+        return;
+      }
+      try {
+        const projects = await apiAddProject(user.id, trimmedName);
         setCustomWorkTypes(projects || []);
-      })
-      .catch(err => {
+      } catch (err) {
         console.error("Failed to add project:", err);
-      });
-  }, [user?.id]);
+      }
+    },
+    [user?.id]
+  );
 
   const removeCustomWorkType = useCallback((name) => {
     setCustomWorkTypes((prev) => prev.filter((n) => n !== name));

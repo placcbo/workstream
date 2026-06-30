@@ -57,9 +57,11 @@ export default function WeekGrid({
         // compete for lanes — a block hidden by the layer toggles (for
         // non-admins) shouldn't reserve width that a visible block could use.
         const renderableBlocks = filteredBlocks.filter((block) => {
+          const myBookings = (block.bookings ?? []).filter((booking) => booking.isMine);
           const showOpen = visibleLayers.has("open") && block.remainingHours > 0;
-          const showReserved = visibleLayers.has("reserved") && block.reservedHours > 0;
-          return showOpen || showReserved || isAdmin;
+          const showReserved = visibleLayers.has("reserved") && myBookings.some((booking) => booking.status !== "completed");
+          const showCompleted = visibleLayers.has("completed") && myBookings.some((booking) => booking.status === "completed");
+          return showOpen || showReserved || showCompleted || isAdmin;
         });
         const laneLayout = assignBlockLanes(renderableBlocks);
         const daySummary = projectFilter
@@ -90,12 +92,26 @@ export default function WeekGrid({
               )}
 
               {filteredBlocks.map((block) => {
+                const myBookings = (block.bookings ?? []).filter((booking) => booking.isMine);
+                const hasMyReservedBooking = myBookings.some((booking) => booking.status !== "completed");
+                const hasMyCompletedBooking = myBookings.some((booking) => booking.status === "completed");
                 const showOpen = visibleLayers.has("open") && block.remainingHours > 0;
-                const showReserved = visibleLayers.has("reserved") && block.reservedHours > 0;
-                if (!showOpen && !showReserved && !isAdmin) return null;
+                const showReserved = visibleLayers.has("reserved") && hasMyReservedBooking;
+                // Bug fix: the "Events" toggle (key "completed") was rendered
+                // by CalendarLayers but never read here, so it had no effect.
+                const showCompleted = visibleLayers.has("completed") && hasMyCompletedBooking;
+                if (!showOpen && !showReserved && !showCompleted && !isAdmin) return null;
 
                 const hasMyReservation = !isAdmin && block.myHours > 0;
-                const isUserReserved = !isAdmin && (hasMyReservation || block.remainingHours <= 0);
+                // Bug fix: onCancelBooking was wired up by BoardPage but never
+                // actually called anywhere in this component — there was no
+                // UI control that invoked it. Find the current user's own
+                // booking on this block (excluding ones already completed,
+                // which the backend rejects cancelling anyway) so a cancel
+                // control has something to act on.
+                const myCancellableBooking = !isAdmin
+                  ? (block.bookings ?? []).find((booking) => booking.isMine && booking.status !== "completed")
+                  : null;
 
                 const startHour = Number.parseInt((block.startTime ?? "08:00").split(":")[0], 10);
                 const startMin  = Number.parseInt(((block.startTime ?? "08:00").split(":")[1]) ?? "0", 10);
@@ -132,6 +148,7 @@ export default function WeekGrid({
                       "calendar-capacity-block",
                       isAdmin && "calendar-capacity-block--admin",
                       hasMyReservation ? "calendar-capacity-block--mine" : isNewOpportunity ? "calendar-capacity-block--open" : "calendar-capacity-block--reserved",
+                      !isAdmin && hasMyCompletedBooking && !hasMyReservedBooking && "calendar-capacity-block--completed",
                       block.isFull && "calendar-capacity-block--full",
                       isSelected && "calendar-capacity-block--selected",
                     ]
@@ -162,7 +179,32 @@ export default function WeekGrid({
                             <span className="calendar-capacity-remaining">{block.remainingHours}h available</span>
                           </>
                         ) : hasMyReservation ? (
-                          <span className="calendar-capacity-claimed">{`${block.myHours || 0}h claimed`}</span>
+                          <>
+                            <span className="calendar-capacity-claimed">{`${block.myHours || 0}h claimed`}</span>
+                            {myCancellableBooking && (
+                              // Not a <button> on purpose — this lives inside the
+                              // outer block <button>, and buttons can't nest.
+                              <span
+                                role="button"
+                                tabIndex={0}
+                                className="calendar-capacity-cancel"
+                                title="Cancel this booking"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  if (!disabled) onCancelBooking(myCancellableBooking.id);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter" || event.key === " ") {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    if (!disabled) onCancelBooking(myCancellableBooking.id);
+                                  }
+                                }}
+                              >
+                                Cancel
+                              </span>
+                            )}
+                          </>
                         ) : null}
                       </span>
                       {!isAdmin && <span className="calendar-capacity-times">{block.startTime} - {block.endTime}</span>}
