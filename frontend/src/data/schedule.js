@@ -155,8 +155,15 @@ export function assignBlockLanes(blocks, rowHeight = ROW_HEIGHT_FOR_LAYOUT) {
 
   const withRange = blocks.map((block) => {
     const startHour = Number.parseInt((block.startTime ?? "08:00").split(":")[0], 10);
-    const start = Math.max(0, (startHour - DAY_START_HOUR) * rowHeight);
-    const span = Math.max(rowHeight, Math.max(1, Number(block.totalHours) || 1) * rowHeight);
+    const startMin  = Number.parseInt(((block.startTime ?? "08:00").split(":")[1]) ?? "0", 10);
+    const endHour   = Number.parseInt((block.endTime   ?? "17:00").split(":")[0], 10);
+    const endMin    = Number.parseInt(((block.endTime   ?? "17:00").split(":")[1]) ?? "0", 10);
+    const startMins = startHour * 60 + startMin;
+    const endMinsRaw = endHour * 60 + endMin;
+    const durationMins = endMinsRaw > startMins ? endMinsRaw - startMins : (24 * 60 - startMins + endMinsRaw);
+    const durationHours = Math.max(1, durationMins / 60);
+    const start = Math.max(0, (startHour - DAY_START_HOUR) * rowHeight + (startMin / 60) * rowHeight);
+    const span = Math.max(rowHeight, durationHours * rowHeight);
     return { block, start, end: start + span };
   });
 

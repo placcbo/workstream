@@ -98,8 +98,17 @@ export default function WeekGrid({
                 const isUserReserved = !isAdmin && (hasMyReservation || block.remainingHours <= 0);
 
                 const startHour = Number.parseInt((block.startTime ?? "08:00").split(":")[0], 10);
-                const top = Math.max(0, (startHour - DAY_START_HOUR) * ROW_HEIGHT);
-                const height = Math.max(ROW_HEIGHT, Math.max(1, Number(block.totalHours) || 1) * ROW_HEIGHT);
+                const startMin  = Number.parseInt(((block.startTime ?? "08:00").split(":")[1]) ?? "0", 10);
+                const endHour   = Number.parseInt((block.endTime   ?? "17:00").split(":")[0], 10);
+                const endMin    = Number.parseInt(((block.endTime   ?? "17:00").split(":")[1]) ?? "0", 10);
+                // Visual height = shift window (startTime→endTime), NOT totalHours.
+                // totalHours is the capacity pool (e.g. 50h across many workers).
+                const startMins = startHour * 60 + startMin;
+                const endMinsRaw = endHour * 60 + endMin;
+                const durationMins = endMinsRaw > startMins ? endMinsRaw - startMins : (24 * 60 - startMins + endMinsRaw);
+                const durationHours = Math.max(1, durationMins / 60);
+                const top = Math.max(0, (startHour - DAY_START_HOUR) * ROW_HEIGHT + (startMin / 60) * ROW_HEIGHT);
+                const height = Math.max(ROW_HEIGHT, durationHours * ROW_HEIGHT);
                 const reservedPct = block.totalHours > 0 ? Math.min(100, ((isAdmin ? block.reservedHours : block.myHours) / block.totalHours) * 100) : 0;
                 const isSelected = pendingClaim?.blockId === block.id;
                 const isNewOpportunity = block.remainingHours > 0;

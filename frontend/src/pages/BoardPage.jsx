@@ -25,6 +25,11 @@ import AdminInsights from "../components/AdminInsights";
 const todayDate = new Date();
 const todayKey = toDateKey(todayDate);
 
+// If a timer was left running across a gap longer than this, we don't
+// trust the elapsed time as real tracked work — auto-stop it and bank a
+// capped amount instead of silently reporting days of "elapsed" time.
+const MAX_PLAUSIBLE_TIMER_HOURS = 12;
+
 export default function BoardPage() {
   const { user, logout, workTypeAccess, grantWorkTypeAccess, revokeWorkTypeAccess, customWorkTypes, addCustomWorkType, clearCustomWorkTypes } = useAuth();
   const isAdmin = user.role === "admin";
@@ -55,6 +60,9 @@ export default function BoardPage() {
   const [timerRunning, setTimerRunning] = useState(false);
   const [timerStartAt, setTimerStartAt] = useState(null);
   const [timerTaskName, setTimerTaskName] = useState("");
+  const [timerBookingId, setTimerBookingId] = useState(null);
+  const [timerBlockId, setTimerBlockId] = useState(null);
+  const [timerDateKey, setTimerDateKey] = useState(null);
   const [reportedHoursOverride, setReportedHoursOverride] = useState(0);
   const [isRefreshingReserved, setIsRefreshingReserved] = useState(false);
 
@@ -192,9 +200,33 @@ export default function BoardPage() {
       const parsed = JSON.parse(stored);
       if (parsed?.timerRunning && parsed?.timerStartAt) {
         const restoredSeconds = Math.max(0, Math.round((Date.now() - parsed.timerStartAt) / 1000));
+        const cappedSeconds = MAX_PLAUSIBLE_TIMER_HOURS * 3600;
+        if (restoredSeconds > cappedSeconds) {
+          // Stale/abandoned timer — bank a capped amount and stop, rather
+          // than resuming a stopwatch that's been "running" for days.
+          const addedHours = Math.round((cappedSeconds / 3600) * 10) / 10;
+          setReportedHoursOverride((current) => {
+            const next = current + addedHours;
+            try {
+              localStorage.setItem(`reportedHoursOverride_${user.id}`, String(next));
+            } catch (err) {
+              console.error("Failed to persist reported hours override", err);
+            }
+            return next;
+          });
+          localStorage.removeItem(`timerState_${user.id}`);
+          setBanner({
+            kind: "warning",
+            text: `A timer was left running for over ${MAX_PLAUSIBLE_TIMER_HOURS}h and has been auto-stopped; ${addedHours}h was banked. Please verify your reported hours.`,
+          });
+          return;
+        }
         setTimerRunning(true);
         setTimerStartAt(parsed.timerStartAt);
         setTimerTaskName(parsed.timerTaskName ?? "");
+        setTimerBookingId(parsed.timerBookingId ?? null);
+        setTimerBlockId(parsed.timerBlockId ?? null);
+        setTimerDateKey(parsed.timerDateKey ?? null);
         setTimerElapsedSeconds(restoredSeconds);
       }
     } catch (err) {
@@ -209,36 +241,55 @@ export default function BoardPage() {
         timerRunning,
         timerStartAt,
         timerTaskName,
+        timerBookingId,
+        timerBlockId,
+        timerDateKey,
       };
       localStorage.setItem(`timerState_${user.id}`, JSON.stringify(timerState));
     } catch (err) {
       console.error("Failed to persist timer state", err);
     }
-  }, [timerRunning, timerStartAt, timerTaskName, user?.id]);
+  }, [timerRunning, timerStartAt, timerTaskName, timerBookingId, timerBlockId, timerDateKey, user?.id]);
 
   useEffect(() => {
     if (!showReservedBlocks) return;
-    loadWeek(anchorDate, true);
-  }, [showReservedBlocks, anchorDate, loadWeek]);
+    // Avoid a forced full-week reload every time the modal is opened — only
+    // refetch if we don't actually have data yet for the current week.
+    if (dateKeys.length === 0 || Object.keys(weekData).length === 0) {
+      loadWeek(anchorDate, true);
+    }
+  }, [showReservedBlocks, anchorDate, loadWeek, dateKeys.length, weekData]);
 
-  const isNowInShiftWindow = useCallback((dateKey, startTime, endTime) => {
-    if (!dateKey || !startTime || !endTime) return false;
+  // Computes the real start/end Date objects for a shift window, handling
+  // overnight shifts (e.g. "16:00" -> "00:00" or "22:00" -> "02:00") by
+  // rolling the end time to the next calendar day whenever endTime is not
+  // strictly after startTime. Mirrors the overnight-rollover handling in
+  // schedule.js's slotEndDateTime, which this logic previously lacked.
+  const getShiftWindow = useCallback((dateKey, startTime, endTime) => {
+    if (!dateKey || !startTime || !endTime) return null;
     const [year, month, day] = dateKey.split("-").map(Number);
     const [startHour, startMinute] = startTime.split(":").map(Number);
     const [endHour, endMinute] = endTime.split(":").map(Number);
-    const now = new Date();
     const start = new Date(year, month - 1, day, startHour, startMinute, 0, 0);
-    const end = new Date(year, month - 1, day, endHour, endMinute, 0, 0);
-    return now >= start && now <= end;
+    const startMinutesOfDay = startHour * 60 + startMinute;
+    const endMinutesOfDay = endHour * 60 + endMinute;
+    const dayOffset = endMinutesOfDay > startMinutesOfDay ? 0 : 1;
+    const end = new Date(year, month - 1, day + dayOffset, endHour, endMinute, 0, 0);
+    return { start, end };
   }, []);
 
-  const isShiftExpired = useCallback((dateKey, endTime) => {
-    if (!dateKey || !endTime) return false;
-    const [year, month, day] = dateKey.split("-").map(Number);
-    const [endHour, endMinute] = endTime.split(":").map(Number);
-    const end = new Date(year, month - 1, day, endHour, endMinute, 0, 0);
-    return new Date() > end;
-  }, []);
+  const isNowInShiftWindow = useCallback((dateKey, startTime, endTime) => {
+    const window = getShiftWindow(dateKey, startTime, endTime);
+    if (!window) return false;
+    const now = new Date();
+    return now >= window.start && now <= window.end;
+  }, [getShiftWindow]);
+
+  const isShiftExpired = useCallback((dateKey, endTime, startTime) => {
+    const window = getShiftWindow(dateKey, startTime, endTime);
+    if (!window) return false;
+    return new Date() > window.end;
+  }, [getShiftWindow]);
 
   const handleRefreshReservedBlocks = useCallback(async () => {
     setIsRefreshingReserved(true);
@@ -262,20 +313,20 @@ export default function BoardPage() {
 
   const formatSeconds = useCallback((seconds) => {
     const pad = (value) => String(value).padStart(2, "0");
-    const hours = Math.floor(seconds / 3600);
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
-    return `${pad(hours)}:${pad(minutes)}:${pad(secs)}`;
+    return days > 0
+      ? `${days}d ${pad(hours)}:${pad(minutes)}:${pad(secs)}`
+      : `${pad(hours)}:${pad(minutes)}:${pad(secs)}`;
   }, []);
 
-  useEffect(() => {
-    if (!timerRunning) return undefined;
-    const interval = setInterval(() => setTimerElapsedSeconds((current) => current + 1), 1000);
-    return () => clearInterval(interval);
-  }, [timerRunning]);
-
-  const handleStartWorking = useCallback((taskName = "") => {
+  const handleStartWorking = useCallback((taskName = "", booking = {}) => {
     if (taskName) setTimerTaskName(taskName);
+    setTimerBookingId(booking.bookingId ?? null);
+    setTimerBlockId(booking.blockId ?? null);
+    setTimerDateKey(booking.dateKey ?? null);
     setTimerStartAt(Date.now());
     setTimerRunning(true);
     setTimerElapsedSeconds(0);
@@ -300,6 +351,9 @@ export default function BoardPage() {
     });
     setTimerElapsedSeconds(0);
     setTimerTaskName("");
+    setTimerBookingId(null);
+    setTimerBlockId(null);
+    setTimerDateKey(null);
 
     try {
       const refreshedSummary = await fetchUserHoursSummary(dateKeys, user?.id ?? "");
@@ -309,6 +363,22 @@ export default function BoardPage() {
       setBanner({ kind: "warning", text: "Timer stopped, but backend confirmation failed." });
     }
   }, [timerElapsedSeconds, timerRunning, dateKeys, user?.id]);
+
+  useEffect(() => {
+    if (!timerRunning) return undefined;
+    const interval = setInterval(() => {
+      setTimerElapsedSeconds((current) => {
+        const next = current + 1;
+        if (next >= MAX_PLAUSIBLE_TIMER_HOURS * 3600) {
+          // Auto-stop on the next tick via handleStopWorking so the elapsed
+          // time gets banked and the timer can't run away indefinitely.
+          setTimeout(() => handleStopWorking(), 0);
+        }
+        return next;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [timerRunning, handleStopWorking]);
 
   const timerButtonText = timerRunning ? "Stop timer" : "Start working";
 
@@ -741,7 +811,11 @@ export default function BoardPage() {
                     {reservedBlocks.length === 0 ? (
                       <div className="reserved-blocks-empty">You have no reserved blocks this week.</div>
                     ) : (
-                      reservedBlocks.map((block) => (
+                      reservedBlocks.map((block) => {
+                        const blockBookingId = block.bookings?.find((booking) => booking.isMine)?.id ?? null;
+                        const isCurrentTask = timerRunning && timerBookingId != null && timerBookingId === blockBookingId;
+                        const expired = isShiftExpired(block.dateKey, block.endTime, block.startTime);
+                        return (
                         <div key={block.id} className="reserved-block-card reserved-block-card--task">
                         <div className="reserved-block-card-title-row">
                           <div>
@@ -753,25 +827,27 @@ export default function BoardPage() {
                             <button
                               className={
                                 `btn btn--ghost reserved-block-card-start ${
-                                  !timerRunning && isShiftExpired(block.dateKey, block.endTime)
+                                  !isCurrentTask && !timerRunning && expired
                                     ? "btn--disabled"
                                     : ""
                                 }`
                               }
-                              disabled={!timerRunning && isShiftExpired(block.dateKey, block.endTime)}
+                              disabled={!isCurrentTask && !timerRunning && expired}
                               onClick={() => {
-                                const isCurrentTask =
-                                  timerRunning &&
-                                  timerTaskName &&
-                                  [block.workType, block.shiftName]
-                                    .filter(Boolean)
-                                    .some((task) => task.toLowerCase() === timerTaskName.toLowerCase());
                                 if (isCurrentTask) {
                                   handleStopWorking();
                                   return;
                                 }
 
-                                if (isShiftExpired(block.dateKey, block.endTime)) {
+                                if (timerRunning) {
+                                  setBanner({
+                                    kind: "error",
+                                    text: "Stop the current timer before starting another.",
+                                  });
+                                  return;
+                                }
+
+                                if (expired) {
                                   setBanner({
                                     kind: "error",
                                     text: "This block has expired.",
@@ -787,21 +863,15 @@ export default function BoardPage() {
                                   return;
                                 }
 
-                                handleStartWorking(block.workType || block.shiftName || "Task");
+                                handleStartWorking(block.workType || block.shiftName || "Task", {
+                                  bookingId: blockBookingId,
+                                  blockId: block.id,
+                                  dateKey: block.dateKey,
+                                });
                               }}
-                              title={
-                                !timerRunning && isShiftExpired(block.dateKey, block.endTime)
-                                  ? "This block has expired"
-                                  : undefined
-                              }
+                              title={!isCurrentTask && !timerRunning && expired ? "This block has expired" : undefined}
                             >
-                              {timerRunning && timerTaskName && [block.workType, block.shiftName]
-                                .filter(Boolean)
-                                .some((task) => task.toLowerCase() === timerTaskName.toLowerCase())
-                                ? "Stop timer"
-                                : isShiftExpired(block.dateKey, block.endTime)
-                                ? "Expired"
-                                : "Start timer"}
+                              {isCurrentTask ? "Stop timer" : expired ? "Expired" : "Start timer"}
                             </button>
                           </div>
                         </div>
@@ -809,7 +879,8 @@ export default function BoardPage() {
                           between {block.dateKey} {block.startTime} to {block.endTime}
                         </div>
                       </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 </div>
@@ -985,7 +1056,7 @@ export default function BoardPage() {
                   </p>
                   <div className="claim-modal-times">
                     <span>Start: {pendingBlock?.startTime ?? "08:00"}</span>
-                    <span>End: {pendingBlock?.endTime ?? "16:00"}</span>
+                    <span>End: {pendingBlock?.endTime ?? "17:00"}</span>
                   </div>
                   <label className="claim-modal-slider">
                     <span>{pendingClaim.hours}h</span>
