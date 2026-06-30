@@ -71,6 +71,11 @@ export default function BoardPage() {
   // hours. Lives entirely on the backend (Store.reportedOverride, keyed by
   // userId) — fetched here, never written to localStorage.
   const [bankedHours, setBankedHours] = useState(0);
+  // { [bookingId]: hoursAlreadyWorkedAndBanked } — per-booking breakdown of
+  // the above, so the reserved-blocks panel can show "X.Xh left" on a block
+  // someone already partially worked, and offer "Resume" instead of
+  // "Start timer".
+  const [bookingBanked, setBookingBanked] = useState({});
   const [isRefreshingReserved, setIsRefreshingReserved] = useState(false);
 
   // Bug fix (Bug 3): clear admin modal state whenever the logged-in user
@@ -191,6 +196,7 @@ export default function BoardPage() {
       setTimerDateKey(null);
       setTimerElapsedSeconds(0);
       setBankedHours(0);
+      setBookingBanked({});
       return;
     }
     let cancelled = false;
@@ -199,6 +205,7 @@ export default function BoardPage() {
         const res = await fetchActiveTimer(user.id);
         if (cancelled) return;
         setBankedHours(res?.bankedHours ?? 0);
+        setBookingBanked(res?.bookingBanked ?? {});
         if (res?.autoStopped) {
           setBanner({
             kind: "warning",
@@ -344,6 +351,7 @@ export default function BoardPage() {
       setTimerDateKey(null);
       if (res?.ok) {
         setBankedHours(res.bankedHours ?? 0);
+        setBookingBanked(res.bookingBanked ?? {});
       }
       const refreshedSummary = await fetchUserHoursSummary(dateKeys, user.id);
       setSummary(refreshedSummary);
@@ -806,6 +814,9 @@ export default function BoardPage() {
                         const blockBookingId = block.bookings?.find((booking) => booking.isMine)?.id ?? null;
                         const isCurrentTask = timerRunning && timerBookingId != null && timerBookingId === blockBookingId;
                         const expired = isShiftExpired(block.dateKey, block.endTime, block.startTime);
+                        const workedHours = blockBookingId != null ? (bookingBanked[blockBookingId] ?? 0) : 0;
+                        const remainingHours = Math.max(0, block.myHours - workedHours);
+                        const hasPriorWork = workedHours > 0;
                         return (
                         <div key={block.id} className="reserved-block-card reserved-block-card--task">
                         <div className="reserved-block-card-title-row">
@@ -814,7 +825,7 @@ export default function BoardPage() {
                             <div className="reserved-block-card-title">{block.shiftName || block.workType || "Shift"}</div>
                           </div>
                           <div className="reserved-block-card-meta">
-                            <span className="reserved-block-card-duration">{block.myHours}h</span>
+                            <span className="reserved-block-card-duration">{remainingHours.toFixed(1)}h</span>
                             <button
                               className={
                                 `btn btn--ghost reserved-block-card-start ${
@@ -862,7 +873,7 @@ export default function BoardPage() {
                               }}
                               title={!isCurrentTask && !timerRunning && expired ? "This block has expired" : undefined}
                             >
-                              {isCurrentTask ? "Stop timer" : expired ? "Expired" : "Start timer"}
+                              {isCurrentTask ? "Stop timer" : expired ? "Expired" : hasPriorWork ? "Resume" : "Start timer"}
                             </button>
                           </div>
                         </div>

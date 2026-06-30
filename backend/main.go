@@ -78,6 +78,7 @@ type Store struct {
 	workTypeAccess   map[string][]string // { workType: [normalized emails...] } — extra grants beyond defaultWorkTypes
 	timers           map[string]*Timer   // keyed by userID — the user's currently-running timer, if any
 	reportedOverride map[string]float64  // keyed by userID — hours banked from stopped timers, on top of completed-booking hours
+	bookingBanked    map[string]float64  // keyed by bookingID — hours already banked into reportedOverride for that specific booking, so completed-shift hours aren't double-counted
 	nextBlockID      int
 	nextBookingID    int
 }
@@ -89,6 +90,7 @@ var store = &Store{
 	workTypeAccess:   make(map[string][]string),
 	timers:           make(map[string]*Timer),
 	reportedOverride: make(map[string]float64),
+	bookingBanked:    make(map[string]float64),
 	nextBlockID:      100,
 	nextBookingID:    100,
 }
@@ -452,7 +454,16 @@ func handleUserHoursSummary(w http.ResponseWriter, r *http.Request) {
 		}
 		reservedHours += booking.Hours
 		if deriveShiftBookingStatus(booking.DateKey, block.StartTime, block.EndTime) == "completed" {
-			reportedHours += booking.Hours
+			// Subtract whatever's already been banked for this booking via
+			// stopped timers (handleStopTimer / handleGetTimer auto-stop) —
+			// that portion is already counted client-side through
+			// reportedOverride, so adding the full booking.Hours here too
+			// would double-count it.
+			alreadyBanked := store.bookingBanked[booking.ID]
+			remaining := float64(booking.Hours) - alreadyBanked
+			if remaining > 0 {
+				reportedHours += int(math.Round(remaining))
+			}
 		}
 	}
 	store.mu.Unlock()
@@ -1007,34 +1018,34 @@ func handleGetTimer(w http.ResponseWriter, r *http.Request) {
 	defer store.mu.Unlock()
 	timer := store.timers[userID]
 	if timer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"timer": nil, "bankedHours": store.reportedOverride[userID]})
+		writeJSON(w, http.StatusOK, map[string]any{"timer": nil, "bankedHours": store.reportedOverride[userID], "bookingBanked": store.bookingBanked})
 		return
 	}
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
 	if elapsedSeconds > maxPlausibleTimerHours*3600 {
 		addedHours := math.Round(maxPlausibleTimerHours*10) / 10
-		// Bug fix: only bank timer hours for ad-hoc tracking (no BookingID).
-		// A timer tied to a specific booking tracks time against a shift
-		// whose FULL reserved hours already get counted in
-		// handleUserHoursSummary once that shift's real end time passes
-		// (deriveShiftBookingStatus). Banking the timer's elapsed hours on
-		// top of that double-counts the same shift once it naturally
-		// completes — this only mattered as a workaround back when
-		// completion was derived from totalHours and effectively never
-		// fired on its own.
-		if timer.BookingID == "" {
-			store.reportedOverride[userID] += addedHours
+		// Bank elapsed hours for every stopped/auto-stopped timer, including
+		// ones tied to a specific booking — partial work should be reported
+		// immediately rather than waiting for the whole shift to complete.
+		// To avoid double-counting once the shift's end time passes (see
+		// handleUserHoursSummary, which only adds a completed booking's
+		// REMAINING un-banked hours), track how much of this booking has
+		// already been banked.
+		store.reportedOverride[userID] += addedHours
+		if timer.BookingID != "" {
+			store.bookingBanked[timer.BookingID] += addedHours
 		}
 		delete(store.timers, userID)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"timer":          nil,
 			"bankedHours":    store.reportedOverride[userID],
+			"bookingBanked":  store.bookingBanked,
 			"autoStopped":    true,
 			"autoStoppedFor": addedHours,
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"timer": timer, "bankedHours": store.reportedOverride[userID]})
+	writeJSON(w, http.StatusOK, map[string]any{"timer": timer, "bankedHours": store.reportedOverride[userID], "bookingBanked": store.bookingBanked})
 }
 
 // POST /api/timer/start { userId, taskName, bookingId, blockId, dateKey }
@@ -1083,24 +1094,27 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 	defer store.mu.Unlock()
 	timer := store.timers[req.UserID]
 	if timer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "addedHours": 0.0, "bankedHours": store.reportedOverride[req.UserID]})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "addedHours": 0.0, "bankedHours": store.reportedOverride[req.UserID], "bookingBanked": store.bookingBanked})
 		return
 	}
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
 	cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
 	addedHours := math.Round((cappedSeconds/3600)*10) / 10
-	// Bug fix: see handleGetTimer for the same reasoning — only bank
-	// elapsed hours for timers not tied to a specific booking, so a
-	// completed shift's reserved hours don't get counted twice (once via
-	// the timer-banked override, once via the booking itself completing).
-	if timer.BookingID == "" {
-		store.reportedOverride[req.UserID] += addedHours
+	// Bank elapsed hours immediately, even for booking-tied timers — partial
+	// work should show up in reported hours right away rather than waiting
+	// for the whole shift to complete. See handleUserHoursSummary for how
+	// double-counting against the eventual completed-booking hours is
+	// avoided via store.bookingBanked.
+	store.reportedOverride[req.UserID] += addedHours
+	if timer.BookingID != "" {
+		store.bookingBanked[timer.BookingID] += addedHours
 	}
 	delete(store.timers, req.UserID)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
-		"addedHours":  addedHours,
-		"bankedHours": store.reportedOverride[req.UserID],
+		"ok":            true,
+		"addedHours":    addedHours,
+		"bankedHours":   store.reportedOverride[req.UserID],
+		"bookingBanked": store.bookingBanked,
 	})
 }
 
