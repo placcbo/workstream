@@ -576,6 +576,13 @@ export default function BoardPage() {
         setActiveDate(dateKey);
         return;
       }
+      // If this is the block whose timer is currently running, the backend
+      // will reject any change/cancel on it anyway — don't even open the
+      // modal, just tell the user up front via a toast.
+      if ((block.myHours ?? 0) > 0 && timerRunning && activeTrackedBlock?.id === block.id) {
+        pushToast("warning", "Stop the timer before changing or cancelling this reservation.");
+        return;
+      }
       setBanner(null);
       setActiveDate(dateKey);
       // Fetch fresh rather than trust cached committedHoursByWorkType, which
@@ -588,14 +595,23 @@ export default function BoardPage() {
         const availableForThisBooking = Math.max(existingHours, (block.remainingHours ?? 0) + existingHours);
         const dailyAllowance = Math.max(existingHours, blockMaxHours - Math.max(0, committedForProject - existingHours));
         const maxHours = Math.min(availableForThisBooking, dailyAllowance);
+        const bookingId = block.bookings?.find((booking) => booking.isMine)?.id ?? null;
+        // The backend won't let hours drop below what's already been worked
+        // on this booking (and won't let it be cancelled at all once any
+        // time has been banked). Mirror that here so the slider can't even
+        // be dragged into a value the next request would just reject.
+        const workedHours = bookingId != null ? (bookingBanked[bookingId] ?? 0) : 0;
+        const minHours = workedHours > 0 ? Math.max(1, Math.ceil(workedHours)) : 0;
         setPendingClaim({
           dateKey,
           blockId: block.id,
           hours: existingHours,
           maxHours,
+          minHours,
+          workedHours,
           existingHours,
           mode: "adjust",
-          bookingId: block.bookings?.find((booking) => booking.isMine)?.id ?? null,
+          bookingId,
           workType: block.workType,
         });
         return;
@@ -618,14 +634,17 @@ export default function BoardPage() {
         maxHoursPerUser: block.maxHoursPerUser ?? MAX_HOURS_PER_DAY,
       });
     },
-    [isAdmin, user?.id]
+    [isAdmin, user?.id, timerRunning, activeTrackedBlock, pushToast, bookingBanked]
   );
 
   const handlePendingHoursChange = useCallback((hours) => {
     setPendingClaim((current) => {
       if (!current) return current;
       if (current.mode === "adjust") {
-        setCancelConfirmOpen(hours === 0);
+        const floor = current.minHours ?? 0;
+        const clamped = Math.max(hours, floor);
+        setCancelConfirmOpen(floor === 0 && clamped === 0);
+        return { ...current, hours: clamped };
       }
       return { ...current, hours };
     });
@@ -1303,11 +1322,16 @@ export default function BoardPage() {
                     <span>Start: {pendingBlock?.startTime ?? "08:00"}</span>
                     <span>End: {pendingBlock?.endTime ?? "17:00"}</span>
                   </div>
+                  {pendingClaim.mode === "adjust" && pendingClaim.minHours > 0 && (
+                    <p className="claim-modal-sub" style={{ color: "var(--amber)" }}>
+                      You've already worked {pendingClaim.workedHours.toFixed(2)}h on this block — it can't be reduced below that.
+                    </p>
+                  )}
                   <label className="claim-modal-slider">
                     <span>{pendingClaim.hours}h</span>
                     <input
                       type="range"
-                      min="0"
+                      min={pendingClaim.mode === "adjust" ? (pendingClaim.minHours ?? 0) : 0}
                       max={pendingClaim.maxHours}
                       step="1"
                       value={pendingClaim.hours}
@@ -1315,7 +1339,9 @@ export default function BoardPage() {
                     />
                     <small>
                       {pendingClaim.mode === "adjust"
-                        ? `Choose between 0h and ${pendingClaim.maxHours}h; setting it to 0 cancels the reservation.`
+                        ? pendingClaim.minHours > 0
+                          ? `Choose between ${pendingClaim.minHours}h and ${pendingClaim.maxHours}h.`
+                          : `Choose between 0h and ${pendingClaim.maxHours}h; setting it to 0 cancels the reservation.`
                         : `Up to ${pendingClaim.maxHours}h available`}
                     </small>
                   </label>
