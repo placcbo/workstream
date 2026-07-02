@@ -205,25 +205,32 @@ body {
   }
 }
 
-/* The single "expensive" surface in the system: a solid black card whose
-   only decoration is the red pulse dot and the digits themselves — the
-   live timer earns focus by being the quietest color choice, not the
-   loudest gradient. */
+/* Pink/magenta "hero" timer card — matches the reference design: a warm
+   gradient panel holding the clock, capped off by a solid dark strip that
+   houses the start/stop action so it reads as its own pinned footer. */
 .reserved-timer-card {
-  background: var(--ink);
-  border: 1px solid var(--line);
+  --hero-pink-top:    #ff6fa0;
+  --hero-pink-mid:    #e94f83;
+  --hero-pink-bottom: #b9316a;
+  --hero-footer:      #1a1218;
+
+  background: linear-gradient(165deg, var(--hero-pink-top) 0%, var(--hero-pink-mid) 55%, var(--hero-pink-bottom) 100%);
+  border: 1px solid rgba(0, 0, 0, 0.15);
   border-radius: var(--radius-lg);
-  padding: 26px 24px 22px;
+  padding: 26px 24px 0;
   display: flex;
   flex-direction: column;
   gap: 18px;
   height: 100%;
+  overflow: hidden;
+  color: #fff;
+  box-shadow: 0 20px 50px rgba(185, 49, 106, 0.35);
 }
 
 .reserved-timer-history {
   margin-top: 4px;
   padding-top: 16px;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid rgba(255, 255, 255, 0.28);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -236,7 +243,7 @@ body {
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--paper-dim);
+  color: rgba(255, 255, 255, 0.75);
 }
 
 .reserved-history-item {
@@ -245,7 +252,7 @@ body {
   justify-content: space-between;
   gap: 14px;
   padding: 10px 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
 }
 
 .reserved-history-item:first-of-type {
@@ -257,8 +264,9 @@ body {
   font-weight: 700;
   font-size: 3.4rem;
   letter-spacing: -0.02em;
-  color: var(--paper);
+  color: #fff;
   text-align: center;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
 }
 
 .reserved-timer-progress {
@@ -272,19 +280,19 @@ body {
   width: 100%;
   height: 2px;
   border-radius: 0;
-  background: var(--line);
+  background: rgba(255, 255, 255, 0.3);
   overflow: hidden;
 }
 
 .reserved-timer-progress-fill {
   height: 100%;
   border-radius: 0;
-  background: var(--signal);
+  background: #fff;
   transition: width 1s linear;
 }
 
 .reserved-timer-progress-label {
-  color: var(--paper-dim);
+  color: rgba(255, 255, 255, 0.85);
   font-family: var(--font-mono);
   font-size: 0.72rem;
   letter-spacing: 0.04em;
@@ -301,19 +309,19 @@ body {
 .reserved-history-title {
   font-weight: 600;
   font-size: 0.95rem;
-  color: var(--paper);
+  color: #fff;
 }
 
 .reserved-history-subtitle {
   font-size: 0.8rem;
-  color: var(--paper-dim);
+  color: rgba(255, 255, 255, 0.75);
 }
 
 .reserved-history-right {
   font-family: var(--font-mono);
   font-size: 1.1rem;
   font-weight: 700;
-  color: var(--paper);
+  color: #fff;
 }
 
 .reserved-timer-header {
@@ -322,25 +330,31 @@ body {
   align-items: center;
   gap: 16px;
   padding-bottom: 14px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.28);
 }
 
+/* Full-bleed dark footer strip pinned to the bottom of the pink card —
+   negative margins cancel the card's side/top padding so this spans edge
+   to edge, then margin-top: auto pushes it down regardless of how much
+   content sits above it. */
 .reserved-timer-action {
   display: flex;
   justify-content: center;
-  margin-top: 4px;
+  margin: auto -24px 0;
+  padding: 18px 24px 20px;
+  background: var(--hero-footer, #1a1218);
 }
 
 .reserved-timer-summary {
   text-align: center;
-  color: var(--paper-dim);
+  color: rgba(255, 255, 255, 0.8);
   font-size: 0.85rem;
   margin-top: 0;
 }
 
 .reserved-timer-summary--header {
   text-align: right;
-  color: var(--paper-dim);
+  color: rgba(255, 255, 255, 0.85);
   font-family: var(--font-mono);
   font-size: 0.72rem;
   white-space: nowrap;
@@ -356,9 +370,9 @@ body {
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  border: 1px solid var(--line-strong);
-  background: var(--ink-raised-2);
-  color: var(--paper);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -379,7 +393,7 @@ body {
 .reserved-timer-name {
   font-size: 0.98rem;
   font-weight: 700;
-  color: var(--paper);
+  color: #fff;
 }
 
 .reserved-timer-status-chip {
@@ -388,37 +402,42 @@ body {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--paper-dim);
-  background: var(--ink-raised-2);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.18);
   border: none;
   padding: 4px 10px;
   border-radius: 999px;
 }
 
 .reserved-timer-status-chip--live {
-  color: var(--signal);
-  background: var(--signal-dim);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.28);
 }
 
 .reserved-timer-email {
-  color: var(--paper-dim);
+  color: rgba(255, 255, 255, 0.75);
   font-size: 0.8rem;
 }
 
+/* Outlined pill button sitting in the dark footer strip, matching the
+   reference screenshot's bordered "START WORKING" look. */
 .reserved-timer-button {
-  background: var(--paper);
-  border: 1px solid var(--paper);
-  color: var(--ink);
-  padding: 10px 22px;
+  background: transparent;
+  border: 1.5px solid #fff;
+  color: #fff;
+  padding: 12px 32px;
   border-radius: var(--radius-sm);
   font-weight: 700;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.82rem;
   box-shadow: none;
+  width: 100%;
 }
 
 .reserved-timer-button:hover {
-  background: transparent;
-  color: var(--paper);
+  background: #fff;
+  color: var(--hero-footer, #1a1218);
   transform: none;
 }
 
