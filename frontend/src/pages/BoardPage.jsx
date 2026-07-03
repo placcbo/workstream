@@ -521,16 +521,17 @@ export default function BoardPage() {
   const pendingHours = pendingClaim?.dateKey === activeDate && pendingClaim?.mode !== "adjust" ? pendingClaim.hours : 0;
   const overBudget = pendingClaim?.mode !== "adjust" && pendingClaim != null && pendingHours > pendingClaim.maxHours;
   const isAdjustingToZero = pendingClaim?.mode === "adjust" && pendingClaim.hours === 0;
- const reservedBlocks = useMemo(() => {
-  if (!user?.id) return [];
 
-  return (weekData[todayKey]?.blocks ?? [])
-    .filter((block) => block.myHours > 0)
-    .map((block) => ({
-      ...block,
-      dateKey: todayKey,
-    }));
-}, [weekData, user?.id]);
+  const reservedBlocks = useMemo(() => {
+    if (!user?.id) return [];
+
+    return (weekData[activeDate]?.blocks ?? [])
+      .filter((block) => block.myHours > 0)
+      .map((block) => ({
+        ...block,
+        dateKey: activeDate,
+      }));
+  }, [weekData, user?.id, activeDate]);
 
   // Step 7: the block currently being tracked, plus how much of its claimed
   // hours have been consumed so far — surfaced as a progress bar on the big
