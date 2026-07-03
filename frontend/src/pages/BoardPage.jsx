@@ -414,6 +414,10 @@ export default function BoardPage() {
     if (!user?.id) return;
     try {
       const res = await apiStopTimer(user.id, snapshotSeconds);
+      if (!res?.ok) {
+        throw new Error("Timer stop was not confirmed.");
+      }
+      offlineSnapshotRef.current = null;
       setTimerRunning(false);
       setTimerStartAt(null);
       setTimerElapsedSeconds(0);
@@ -421,10 +425,8 @@ export default function BoardPage() {
       setTimerBookingId(null);
       setTimerBlockId(null);
       setTimerDateKey(null);
-      if (res?.ok) {
-        setBankedHours(res.bankedHours ?? 0);
-        setBookingBanked(res.bookingBanked ?? {});
-      }
+      setBankedHours(res.bankedHours ?? 0);
+      setBookingBanked(res.bookingBanked ?? {});
       const refreshedSummary = await fetchUserHoursSummary(dateKeys, user.id);
       setSummary(refreshedSummary);
       pushToast(
@@ -445,6 +447,7 @@ export default function BoardPage() {
   }, [timerElapsedSeconds]);
 
   const offlineSnapshotRef = useRef(null);
+  const offlineAutoStopInFlightRef = useRef(false);
   const offlineToastIdRef = useRef(null);
 
   useEffect(() => {
@@ -468,9 +471,12 @@ export default function BoardPage() {
         offlineToastIdRef.current = null;
       }
       const snapshot = offlineSnapshotRef.current;
-      offlineSnapshotRef.current = null;
       if (snapshot != null) {
-        handleOfflineAutoStop(snapshot);
+        if (offlineAutoStopInFlightRef.current) return;
+        offlineAutoStopInFlightRef.current = true;
+        handleOfflineAutoStop(snapshot).finally(() => {
+          offlineAutoStopInFlightRef.current = false;
+        });
       } else {
         pushToast("success", "Back online.");
       }
