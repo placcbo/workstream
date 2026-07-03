@@ -384,9 +384,12 @@ export default function BoardPage() {
   }, [user?.id]);
 
   const handleStopWorking = useCallback(async () => {
-    if (!timerRunning || !user?.id) return;
+    if (!timerRunning || !user?.id) return false;
     try {
       const res = await apiStopTimer(user.id);
+      if (!res?.ok) {
+        throw new Error("Timer stop was not confirmed.");
+      }
       setTimerRunning(false);
       setTimerStartAt(null);
       setTimerElapsedSeconds(0);
@@ -394,15 +397,15 @@ export default function BoardPage() {
       setTimerBookingId(null);
       setTimerBlockId(null);
       setTimerDateKey(null);
-      if (res?.ok) {
-        setBankedHours(res.bankedHours ?? 0);
-        setBookingBanked(res.bookingBanked ?? {});
-      }
+      setBankedHours(res.bankedHours ?? 0);
+      setBookingBanked(res.bookingBanked ?? {});
       const refreshedSummary = await fetchUserHoursSummary(dateKeys, user.id);
       setSummary(refreshedSummary);
       setBanner({ kind: "success", text: "Timer stopped and backend confirmed." });
+      return true;
     } catch (err) {
-      setBanner({ kind: "warning", text: "Timer stopped locally, but backend confirmation failed." });
+      setBanner({ kind: "warning", text: "Could not confirm the timer stop. The timer is still running; try again when the backend is reachable." });
+      return false;
     }
   }, [timerRunning, dateKeys, user?.id]);
 
@@ -575,9 +578,13 @@ export default function BoardPage() {
     const reason = shiftExpired
       ? `the shift window (${activeTrackedBlock.startTime}–${activeTrackedBlock.endTime}) has ended`
       : `you've used all ${activeTrackedBlock.myHours}h reserved on ${label}`;
-    handleStopWorking().then(() => {
-      pushToast("error", `Reservation expired — ${reason}. Timer stopped automatically and your hours were reported. Start working again to continue.`);
-      setBanner({ kind: "error", text: `Reservation expired (${label}) — timer stopped automatically and your hours were reported.` });
+    handleStopWorking().then((stopped) => {
+      if (stopped) {
+        pushToast("error", `Reservation expired — ${reason}. Timer stopped automatically and your hours were reported. Start working again to continue.`);
+        setBanner({ kind: "error", text: `Reservation expired (${label}) — timer stopped automatically and your hours were reported.` });
+      } else {
+        pushToast("warning", `Reservation expired — ${reason}, but the timer stop could not be confirmed. Try stopping it again.`);
+      }
     });
   }, [timerRunning, activeTrackedBlock, timerElapsedSeconds, timerBookingId, bookingBanked, isShiftExpired, handleStopWorking, pushToast]);
 
