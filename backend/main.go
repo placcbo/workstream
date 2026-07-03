@@ -465,7 +465,7 @@ func handleUserHoursSummary(w http.ResponseWriter, r *http.Request) {
 	for _, k := range payload.DateKeys {
 		dateSet[k] = struct{}{}
 	}
-	reportedHours := 0
+	reportedHours := 0.0
 	reservedHours := 0
 	store.mu.Lock()
 	for _, booking := range store.bookings {
@@ -492,12 +492,12 @@ func handleUserHoursSummary(w http.ResponseWriter, r *http.Request) {
 			alreadyBanked := store.bookingBanked[booking.ID]
 			remaining := float64(booking.Hours) - alreadyBanked
 			if remaining > 0 {
-				reportedHours += int(math.Round(remaining))
+				reportedHours += remaining
 			}
 		}
 	}
 	store.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]int{"reportedHours": reportedHours, "reservedHours": reservedHours})
+	writeJSON(w, http.StatusOK, map[string]any{"reportedHours": reportedHours, "reservedHours": reservedHours})
 }
 
 func summarizeDateForOwner(dateKey, ownerID string) Summary {

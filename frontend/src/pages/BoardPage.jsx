@@ -42,7 +42,17 @@ export default function BoardPage() {
   // undefined → was passed as [] to fetchWeekSchedule, which (after fixing
   // Bug 1) would now show nothing. Pass null explicitly for admins so the API
   // skips filtering entirely.
-  const grantedWorkTypes = isAdmin ? null : (user?.grantedWorkTypes ?? []);
+  const grantedWorkTypes = useMemo(() => {
+    if (isAdmin) return null;
+    const normalizedEmail = (user?.email ?? "").trim().toLowerCase();
+    const granted = new Set(user?.defaultWorkTypes ?? []);
+    Object.entries(workTypeAccess ?? {}).forEach(([workType, emails]) => {
+      if (!Array.isArray(emails)) return;
+      const hasGrant = emails.some((email) => String(email).trim().toLowerCase() === normalizedEmail);
+      if (hasGrant) granted.add(workType);
+    });
+    return Array.from(granted);
+  }, [isAdmin, user?.defaultWorkTypes, user?.email, workTypeAccess]);
 
   const [anchorDate, setAnchorDate] = useState(todayDate);
   const [monthCursor, setMonthCursor] = useState({ year: todayDate.getFullYear(), month: todayDate.getMonth() });
@@ -121,9 +131,6 @@ export default function BoardPage() {
   // every render caused loadWeek to be recreated every render, which triggered
   // the useEffect below on every render (infinite loop). We stabilise it with
   // a ref so the callback only sees the latest value without it being a dep.
-  const grantedWorkTypesRef = useRef(grantedWorkTypes);
-  useEffect(() => { grantedWorkTypesRef.current = grantedWorkTypes; }, [grantedWorkTypes]);
-
   const loadWeek = useCallback(async (weekAnchorDate = anchorDate, showSpinner = false) => {
     if (showSpinner) {
       setLoading(true);
@@ -131,7 +138,7 @@ export default function BoardPage() {
     try {
       const keys = await fetchWeekRange(weekAnchorDate);
       setDateKeys(keys);
-      const data = await fetchWeekSchedule(keys, user?.id ?? "", isAdmin, grantedWorkTypesRef.current);
+      const data = await fetchWeekSchedule(keys, user?.id ?? "", isAdmin, grantedWorkTypes);
       setWeekData(data);
       setSummary(await fetchUserHoursSummary(keys, user?.id ?? ""));
     } catch (err) {
@@ -144,7 +151,7 @@ export default function BoardPage() {
     } finally {
       setLoading(false);
     }
-  }, [anchorDate, user?.id, isAdmin]); // grantedWorkTypes accessed via ref — no array dep
+  }, [anchorDate, user?.id, isAdmin, grantedWorkTypes]);
 
   useEffect(() => {
     loadWeek(anchorDate, true);
@@ -206,7 +213,19 @@ export default function BoardPage() {
     [committedHoursByWorkType]
   );
 
-  const effectiveReportedHours = summary.reportedHours + bankedHours;
+  const bankedHoursInVisibleWeek = useMemo(() => {
+    const bookingIds = new Set();
+    dateKeys.forEach((dateKey) => {
+      (weekData[dateKey]?.blocks ?? []).forEach((block) => {
+        (block.bookings ?? []).forEach((booking) => {
+          if (booking.isMine) bookingIds.add(booking.id);
+        });
+      });
+    });
+    return Array.from(bookingIds).reduce((sum, bookingId) => sum + Number(bookingBanked[bookingId] ?? 0), 0);
+  }, [dateKeys, weekData, bookingBanked]);
+
+  const effectiveReportedHours = summary.reportedHours + bankedHoursInVisibleWeek;
 
   // Pull the active timer (if any) from the backend whenever the user
   // changes — this is what lets a second browser/private window, or a page
