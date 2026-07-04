@@ -1154,69 +1154,72 @@ export default function BoardPage() {
                         const showEyebrow = Boolean(block.workType) && block.workType !== displayTitle;
                         return (
                         <div key={block.id} className={`reserved-block-card reserved-block-card--task ${isCurrentTask ? "reserved-block-card--active" : ""}`}>
-                        <div className="reserved-block-card-title-row">
-                          <div>
-                            {showEyebrow && <div className="reserved-block-card-label">{block.workType}</div>}
-                            <div className={`reserved-block-card-title ${showEyebrow ? "" : "reserved-block-card-title--standalone"}`}>{displayTitle}</div>
+                        <div className="reserved-block-card-header">
+                          {showEyebrow && <div className="reserved-block-card-label">{block.workType}</div>}
+                          <div
+                            className={`reserved-block-card-title ${showEyebrow ? "" : "reserved-block-card-title--standalone"}`}
+                            title={displayTitle}
+                          >
+                            {displayTitle}
                           </div>
-                          <div className="reserved-block-card-meta">
-                            <span className={`reserved-block-card-duration ${isCurrentTask ? "reserved-block-card-duration--live" : ""}`}>{remainingHours.toFixed(2)}h</span>
-                            {isCurrentTask ? (
-                              // Step 3: stopping now lives solely on the big timer card —
-                              // this badge just reflects state, it doesn't duplicate the action.
-                              <span className="reserved-block-card-tracking-badge">
-                                <span className="reserved-block-card-tracking-dot" aria-hidden="true" />
-                                Tracking
-                              </span>
-                            ) : (
-                            <button
-                              className={
-                                `btn btn--ghost reserved-block-card-start ${
-                                  expired || outsideShiftWindow || isOffline ? "btn--disabled" : ""
-                                }`
+                        </div>
+                        <div className="reserved-block-card-meta">
+                          <span className={`reserved-block-card-duration ${isCurrentTask ? "reserved-block-card-duration--live" : ""}`}>{remainingHours.toFixed(2)}h left</span>
+                          {isCurrentTask ? (
+                            // Step 3: stopping now lives solely on the big timer card —
+                            // this badge just reflects state, it doesn't duplicate the action.
+                            <span className="reserved-block-card-tracking-badge">
+                              <span className="reserved-block-card-tracking-dot" aria-hidden="true" />
+                              Tracking
+                            </span>
+                          ) : (
+                          <button
+                            className={
+                              `btn btn--ghost reserved-block-card-start ${
+                                expired || outsideShiftWindow || isOffline ? "btn--disabled" : ""
+                              }`
+                            }
+                            disabled={(!timerRunning && expired) || isOffline}
+                            onClick={async () => {
+                              if (isOffline) {
+                                pushToast("warning", "You're offline — reconnect before starting the timer.");
+                                return;
                               }
-                              disabled={(!timerRunning && expired) || isOffline}
-                              onClick={async () => {
-                                if (isOffline) {
-                                  pushToast("warning", "You're offline — reconnect before starting the timer.");
-                                  return;
-                                }
 
-                                if (expired) {
-                                  setBanner({
-                                    kind: "error",
-                                    text: "This block has expired.",
-                                  });
-                                  return;
-                                }
-
-                                if (!isNowInShiftWindow(block.dateKey, block.startTime, block.endTime)) {
-                                  setBanner({
-                                    kind: "error",
-                                    text: `Cannot start timer outside the permitted shift window (${block.startTime}–${block.endTime}).`,
-                                  });
-                                  return;
-                                }
-
-                                if (timerRunning) {
-                                  // Switching tasks: stop (and bank) the currently running
-                                  // timer before starting the newly selected block, rather
-                                  // than blocking the user from switching.
-                                  await handleStopWorking();
-                                }
-
-                                handleStartWorking(block.workType || block.shiftName || "Task", {
-                                  bookingId: blockBookingId,
-                                  blockId: block.id,
-                                  dateKey: block.dateKey,
+                              if (expired) {
+                                setBanner({
+                                  kind: "error",
+                                  text: "This block has expired.",
                                 });
-                              }}
-                              title={startDisabledReason}
-                            >
-                              {expired ? "Expired" : hasPriorWork ? "Resume" : "Start timer"}
-                            </button>
-                            )}
-                          </div>
+                                return;
+                              }
+
+                              if (!isNowInShiftWindow(block.dateKey, block.startTime, block.endTime)) {
+                                setBanner({
+                                  kind: "error",
+                                  text: `Cannot start timer outside the permitted shift window (${block.startTime}–${block.endTime}).`,
+                                });
+                                return;
+                              }
+
+                              if (timerRunning) {
+                                // Switching tasks: stop (and bank) the currently running
+                                // timer before starting the newly selected block, rather
+                                // than blocking the user from switching.
+                                await handleStopWorking();
+                              }
+
+                              handleStartWorking(block.workType || block.shiftName || "Task", {
+                                bookingId: blockBookingId,
+                                blockId: block.id,
+                                dateKey: block.dateKey,
+                              });
+                            }}
+                            title={startDisabledReason}
+                          >
+                            {expired ? "Expired" : hasPriorWork ? "Resume" : "Start timer"}
+                          </button>
+                          )}
                         </div>
                         <div className="reserved-block-card-progress-track">
                           <div
@@ -1225,7 +1228,7 @@ export default function BoardPage() {
                           />
                         </div>
                         <div className="reserved-block-details">
-                          between {block.dateKey} {block.startTime} to {block.endTime}
+                          {formatDateHeading(block.dateKey)} · {block.startTime}–{block.endTime}
                         </div>
                       </div>
                         );
