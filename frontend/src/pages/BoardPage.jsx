@@ -1063,22 +1063,6 @@ export default function BoardPage() {
                     </div>
                   </div>
                   <div className="reserved-timer-clock">{formatSeconds(timerElapsedSeconds)}</div>
-                  <div className="reserved-timer-history">
-    <h4>Recent activity</h4>
-
-  <div className="reserved-history-item">
-    <div className="reserved-history-left">
-        <div className="reserved-history-title">Yesterday</div>
-        <div className="reserved-history-subtitle">
-            Hours successfully reported
-        </div>
-    </div>
-
-    <div className="reserved-history-right">
-        {effectiveReportedHours.toFixed(2)}h
-    </div>
-</div>
-</div>
                   {activeTrackedBlock && (
                     <div className="reserved-timer-progress">
                       <div className="reserved-timer-progress-track">
@@ -1102,7 +1086,7 @@ export default function BoardPage() {
                 </div>
                 <div className={`reserved-blocks-right ${timerRunning ? "reserved-blocks-right--tracking" : ""}`}>
                   <div className="reserved-blocks-titlebar">
-                    <span>Your reserved block(s)</span>
+                    <span>Reserved blocks</span>
                     <button
                       className="btn btn--ghost reserved-blocks-refresh"
                       disabled={isRefreshingReserved}

@@ -463,7 +463,7 @@ body {
   gap: 12px;
 }
 
-.reserved-block-card-title-row {
+.reserved-block-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2930,6 +2930,37 @@ body {
 .claim-modal-slider small {
   color: var(--paper-dim);
   font-size: 0.74rem;
+}
+
+.admin-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.admin-field span {
+  font-size: 0.66rem;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--paper-dim);
+}
+
+.admin-field input {
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  width: 100%;
+  transition: border-color 0.14s;
+}
+
+.admin-field input:focus {
+  outline: none;
+  border-color: var(--paper);
 }
 
 .claim-modal-actions {
