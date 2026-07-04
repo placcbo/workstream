@@ -1669,72 +1669,6 @@ body {
 /* Confirm bar (gauge + booking summary)                                  */
 /* ---------------------------------------------------------------------- */
 
-.hour-gauge {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-}
-
-.hour-gauge-track {
-  position: relative;
-  width: 28px;
-  height: 180px;
-  background: var(--ink);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-
-.hour-gauge-fill {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  transition: height 0.25s ease;
-}
-
-.hour-gauge-fill--committed {
-  background: var(--paper);
-  z-index: 2;
-}
-
-.hour-gauge-fill--pending {
-  background: var(--teal);
-  z-index: 1;
-}
-
-.hour-gauge-tick {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: rgba(10, 18, 14, 0.5);
-  z-index: 3;
-}
-
-.hour-gauge-readout {
-  font-family: var(--font-mono);
-  display: flex;
-  align-items: baseline;
-  gap: 2px;
-}
-
-.hour-gauge-value {
-  font-size: 1.4rem;
-  font-weight: 700;
-  color: var(--paper);
-}
-
-.hour-gauge-value.is-over {
-  color: var(--signal);
-}
-
-.hour-gauge-max {
-  font-size: 0.8rem;
-  color: var(--paper-dim);
-}
-
 .sidebar-copy {
   text-align: center;
 }
@@ -1781,27 +1715,11 @@ body {
 
 .mini-month,
 .calendar-layers,
-.time-insights,
-.board-rail-gauge {
+.time-insights {
   background: var(--ink-raised);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   padding: 16px 16px 18px;
-}
-
-.board-rail-gauge {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.board-rail-gauge-label {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 0.84rem;
-  letter-spacing: -0.01em;
-  color: var(--paper);
 }
 
 .mini-month-header {
