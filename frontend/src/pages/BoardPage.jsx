@@ -35,6 +35,10 @@ const todayKey = toDateKey(todayDate);
 // capped amount instead of silently reporting days of "elapsed" time.
 const MAX_PLAUSIBLE_TIMER_HOURS = 12;
 
+// Geometry for the flat timer card's circular progress ring.
+const TIMER_RING_RADIUS = 30;
+const TIMER_RING_CIRCUMFERENCE = 2 * Math.PI * TIMER_RING_RADIUS;
+
 export default function BoardPage() {
   const { user, logout, workTypeAccess, grantWorkTypeAccess, revokeWorkTypeAccess, customWorkTypes, addCustomWorkType, clearCustomWorkTypes } = useAuth();
   const isAdmin = user.role === "admin";
@@ -1048,40 +1052,58 @@ export default function BoardPage() {
                       ) : (
                         <span className="reserved-timer-avatar">{userInitials}</span>
                       )}
-                      <div>
-                        <div className="reserved-timer-name-row">
-                          <span className="reserved-timer-name">{user?.name ?? "Work user"}</span>
-                          <span className={`reserved-timer-status-chip ${timerRunning ? "reserved-timer-status-chip--live" : ""}`}>
-                            {timerStatusText}
-                          </span>
-                        </div>
-                        <div className="reserved-timer-email">{user?.email ?? "No email"}</div>
+                      <div className="reserved-timer-user-text">
+                        <span className="reserved-timer-name">{user?.name ?? "Work user"}</span>
+                        <span className="reserved-timer-email">{user?.email ?? "No email"}</span>
                       </div>
                     </div>
-                    <div className="reserved-timer-summary reserved-timer-summary--header">
-                      Reported: {effectiveReportedHours.toFixed(2)}h
+                    <span className={`reserved-timer-status-chip ${timerRunning ? "reserved-timer-status-chip--live" : ""}`}>
+                      {timerRunning && <span className="reserved-timer-status-dot" aria-hidden="true" />}
+                      {timerStatusText}
+                    </span>
+                  </div>
+
+                  <div className="reserved-timer-divider" />
+
+                  <div className="reserved-timer-body">
+                    {activeTrackedBlock && (
+                      <svg className="reserved-timer-ring" width="72" height="72" viewBox="0 0 72 72" aria-hidden="true">
+                        <circle className="reserved-timer-ring-track" cx="36" cy="36" r={TIMER_RING_RADIUS} fill="none" strokeWidth="7" />
+                        <circle
+                          className="reserved-timer-ring-fill"
+                          cx="36"
+                          cy="36"
+                          r={TIMER_RING_RADIUS}
+                          fill="none"
+                          strokeWidth="7"
+                          strokeLinecap="round"
+                          strokeDasharray={TIMER_RING_CIRCUMFERENCE}
+                          strokeDashoffset={TIMER_RING_CIRCUMFERENCE * (1 - activeTrackedProgressPct / 100)}
+                          transform="rotate(-90 36 36)"
+                        />
+                      </svg>
+                    )}
+                    <div className="reserved-timer-body-text">
+                      <div className="reserved-timer-clock">{formatSeconds(timerElapsedSeconds)}</div>
+                      {activeTrackedBlock && (
+                        <span className="reserved-timer-progress-label">
+                          {Math.max(0, activeTrackedBlock.myHours - (activeTrackedProgressPct / 100) * activeTrackedBlock.myHours).toFixed(2)}h left on {activeTrackedBlock.shiftName || activeTrackedBlock.workType}
+                        </span>
+                      )}
                     </div>
                   </div>
-                  <div className="reserved-timer-clock">{formatSeconds(timerElapsedSeconds)}</div>
-                  {activeTrackedBlock && (
-                    <div className="reserved-timer-progress">
-                      <div className="reserved-timer-progress-track">
-                        <div
-                          className="reserved-timer-progress-fill"
-                          style={{ width: `${activeTrackedProgressPct}%` }}
-                        />
-                      </div>
-                      <span className="reserved-timer-progress-label">
-                        {Math.max(0, activeTrackedBlock.myHours - (activeTrackedProgressPct / 100) * activeTrackedBlock.myHours).toFixed(2)}h left on {activeTrackedBlock.shiftName || activeTrackedBlock.workType}
-                      </span>
-                    </div>
-                  )}
+
+                  <div className="reserved-timer-divider" />
+
+                  <div className="reserved-timer-summary-row">
+                    <span>Reported today</span>
+                    <span className="reserved-timer-summary-value">{effectiveReportedHours.toFixed(2)}h</span>
+                  </div>
+
                   {timerRunning && (
-                    <div className="reserved-timer-action reserved-timer-action--stop">
-                      <button className="btn btn--ghost reserved-timer-button" onClick={handleStopWorking}>
-                        Stop timer
-                      </button>
-                    </div>
+                    <button className="btn btn--ghost reserved-timer-button" onClick={handleStopWorking}>
+                      Stop timer
+                    </button>
                   )}
                 </div>
                 <div className={`reserved-blocks-right ${timerRunning ? "reserved-blocks-right--tracking" : ""}`}>
