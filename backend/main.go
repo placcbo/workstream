@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,6 +13,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Block struct {
@@ -289,12 +288,15 @@ func normalizeEmail(value string) string {
 }
 
 func hashPassword(password string) string {
-	sum := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(sum[:])
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Fatalf("failed to hash password: %v", err)
+	}
+	return string(hash)
 }
 
 func passwordMatches(hash, password string) bool {
-	return hashPassword(password) == hash
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
 func blockWorkType(dateKey, blockID string) string {
@@ -1302,13 +1304,21 @@ func handleGetTimer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"timer":          nil,
 			"bankedHours":    store.reportedOverride[userID],
-			"bookingBanked":  store.bookingBanked,
+			"bookingBanked":  bookingBankedForUser(userID),
 			"autoStopped":    true,
 			"autoStoppedFor": addedHours,
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"timer": timer, "bankedHours": store.reportedOverride[userID], "bookingBanked": store.bookingBanked})
+	writeJSON(w, http.StatusOK, map[string]any{"timer": timer, "bankedHours": store.reportedOverride[userID], "bookingBanked": bookingBankedForUser(userID)})
+}
+
+func handleTimerRouter(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		handleGetTimer(w, r)
+	} else {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
+	}
 }
 
 // POST /api/timer/start { userId, taskName, bookingId, blockId, dateKey }
@@ -1392,7 +1402,8 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 		"ok":            true,
 		"addedHours":    addedHours,
 		"bankedHours":   store.reportedOverride[req.UserID],
-			"bookingBanked": bookingBankedForUser(req.UserID),
+		"bookingBanked": bookingBankedForUser(req.UserID),
+	})
 }
 
 // ---------------------------------------------------------------------------
