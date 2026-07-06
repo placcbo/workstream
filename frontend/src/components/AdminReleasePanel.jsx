@@ -117,10 +117,6 @@ export default function AdminReleasePanel({
     }
   }, [allWorkTypes.join(","), workType]);
 
-  const canRelease =
-    !disabled && totalHours >= 1 && effectiveWorkType.length > 0 && recurrenceValid && !recurringPoolTooSmall;
-  const canReleaseWithCap = canRelease && (maxHoursPerUser >= 1 && maxHoursPerUser <= 24);
-
   useEffect(() => {
     if (highlightedProject && customWorkTypes.includes(highlightedProject)) {
       setWorkType(highlightedProject);
@@ -168,6 +164,7 @@ export default function AdminReleasePanel({
 
   const canRelease =
     !disabled && totalHours >= 1 && effectiveWorkType.length > 0 && recurrenceValid && !recurringPoolTooSmall;
+  const canReleaseWithCap = canRelease && (maxHoursPerUser >= 1 && maxHoursPerUser <= 24);
 
   return (
     <div className="arp">
