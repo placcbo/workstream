@@ -301,9 +301,13 @@ export function revokeBlock(dateKey, blockId) {
   return delay({ ok: true });
 }
 
-export function reserveHours(dateKey, blockId, hours, userId, maxHoursPerDay) {
+export function reserveHours(dateKey, blockId, hours, userId, maxHoursPerDay, userWorkTypes = null) {
   const block = (releaseBlocks.get(dateKey) ?? []).find((candidate) => candidate.id === blockId);
   if (!block) return delay({ ok: false, error: "Block not found." });
+
+  if (Array.isArray(userWorkTypes) && !userWorkTypes.includes(block.workType)) {
+    return delay({ ok: false, error: "forbidden" });
+  }
 
   const claimHours = Math.max(1, Number(hours) || 1);
   const remainingHours = remainingForBlock(block);

@@ -842,7 +842,7 @@ func handleReleaseHoursRecurring(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
-	_, ok := requireAdminAccount(w, r)
+	account, ok := requireAdminAccount(w, r)
 	if !ok {
 		return
 	}
@@ -868,6 +868,10 @@ func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
 	for i, block := range current {
 		if block.ID != payload.BlockID {
 			continue
+		}
+		if block.OwnerID != account.ID {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+			return
 		}
 		reserved = reservedForBlock(block.ID)
 		normalizedTotal := payload.TotalHours
@@ -933,7 +937,7 @@ func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRevokeBlock(w http.ResponseWriter, r *http.Request) {
-	_, ok := requireAdminAccount(w, r)
+	account, ok := requireAdminAccount(w, r)
 	if !ok {
 		return
 	}
@@ -947,11 +951,26 @@ func handleRevokeBlock(w http.ResponseWriter, r *http.Request) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	current := store.releaseBlocks[payload.DateKey]
+	var target *Block
+	for _, block := range current {
+		if block.ID == payload.BlockID {
+			target = &block
+			break
+		}
+	}
+	if target == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Block not found."})
+		return
+	}
+	if target.OwnerID != account.ID {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+		return
+	}
 	if reservedForBlock(payload.BlockID) > 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "This block already has reservations."})
 		return
 	}
-	current := store.releaseBlocks[payload.DateKey]
 	next := make([]Block, 0, len(current))
 	for _, block := range current {
 		if block.ID == payload.BlockID {
@@ -995,6 +1014,20 @@ func handleReserveHours(w http.ResponseWriter, r *http.Request) {
 	if block.ID == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Block not found."})
 		return
+	}
+	if account.Role != "admin" {
+		allowedWorkTypes := resolveGrantedWorkTypesForEmail(account.Email, account.DefaultWorkTypes)
+		allowed := false
+		for _, wt := range allowedWorkTypes {
+			if wt == block.WorkType {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+			return
+		}
 	}
 	remainingHours := remainingForBlock(block)
 	if payload.Hours > remainingHours {
@@ -1456,7 +1489,7 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 	defer store.mu.Unlock()
 	timer := store.timers[req.UserID]
 	if timer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "addedHours": 0.0, "bankedHours": store.reportedOverride[req.UserID], "bookingBanked": store.bookingBanked})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "addedHours": 0.0, "bankedHours": store.reportedOverride[req.UserID], "bookingBanked": bookingBankedForUser(req.UserID)})
 		return
 	}
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000

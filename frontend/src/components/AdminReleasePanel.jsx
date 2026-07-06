@@ -117,7 +117,10 @@ export default function AdminReleasePanel({
     }
   }, [allWorkTypes.join(","), workType]);
 
+  const canRelease =
+    !disabled && totalHours >= 1 && effectiveWorkType.length > 0 && recurrenceValid && !recurringPoolTooSmall;
   const canReleaseWithCap = canRelease && (maxHoursPerUser >= 1 && maxHoursPerUser <= 24);
+
   useEffect(() => {
     if (highlightedProject && customWorkTypes.includes(highlightedProject)) {
       setWorkType(highlightedProject);
@@ -332,7 +335,7 @@ export default function AdminReleasePanel({
         <div className="arp-release-row">
           <button
             className="btn btn--amber arp-release-btn"
-            disabled={!canRelease}
+            disabled={!canReleaseWithCap}
             onClick={() => {
               onRelease({
                 dateKey: selectedDate,

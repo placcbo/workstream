@@ -652,6 +652,7 @@ export default function BoardPage() {
           mode: "adjust",
           bookingId,
           workType: block.workType,
+          maxHoursPerUser: block.maxHoursPerUser ?? MAX_HOURS_PER_DAY,
         });
         return;
       }
