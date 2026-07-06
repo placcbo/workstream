@@ -319,6 +319,19 @@ func userHoursForDayAndWorkType(dateKey, userID, workType, excludeBookingID stri
 	return sum
 }
 
+func bookingBankedForUser(userID string) map[string]float64 {
+	result := make(map[string]float64)
+	for _, booking := range store.bookings {
+		if booking.UserID != userID {
+			continue
+		}
+		if amount, ok := store.bookingBanked[booking.ID]; ok && amount > 0 {
+			result[booking.ID] = amount
+		}
+	}
+	return result
+}
+
 func serializeBlock(block Block, currentUserID string) BlockResponse {
 	blockBookings := getBlockBookings(block.ID)
 	reservedHours := 0
@@ -1268,7 +1281,7 @@ func handleGetTimer(w http.ResponseWriter, r *http.Request) {
 	defer store.mu.Unlock()
 	timer := store.timers[userID]
 	if timer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"timer": nil, "bankedHours": store.reportedOverride[userID], "bookingBanked": store.bookingBanked})
+		writeJSON(w, http.StatusOK, map[string]any{"timer": nil, "bankedHours": store.reportedOverride[userID], "bookingBanked": bookingBankedForUser(userID)})
 		return
 	}
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
@@ -1379,16 +1392,7 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 		"ok":            true,
 		"addedHours":    addedHours,
 		"bankedHours":   store.reportedOverride[req.UserID],
-		"bookingBanked": store.bookingBanked,
-	})
-}
-
-func handleTimerRouter(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		handleGetTimer(w, r)
-	} else {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
-	}
+			"bookingBanked": bookingBankedForUser(req.UserID),
 }
 
 // ---------------------------------------------------------------------------

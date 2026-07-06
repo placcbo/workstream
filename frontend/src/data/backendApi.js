@@ -42,7 +42,12 @@ async function callApi(path, body, method = "POST") {
 }
 
 async function getApi(path) {
-  const response = await fetch(`${BASE_URL}${path}`);
+  const headers = {};
+  const sessionId = getSessionId();
+  if (sessionId) {
+    headers["X-Session-Id"] = sessionId;
+  }
+  const response = await fetch(`${BASE_URL}${path}`, { headers });
   const payload = await readResponsePayload(response);
   if (!response.ok) {
     const errorMessage = payload && typeof payload === "object" && payload.error ? payload.error : typeof payload === "string" && payload ? payload : `Request failed with status ${response.status}`;
