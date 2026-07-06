@@ -58,8 +58,12 @@ async function getApi(path) {
   return payload;
 }
 
+function localDateKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 export function fetchWeekRange(anchorDate) {
-  return getApi(`/week-range?anchorDate=${encodeURIComponent(anchorDate.toISOString().slice(0, 10))}`);
+  return getApi(`/week-range?anchorDate=${encodeURIComponent(localDateKey(anchorDate))}`);
 }
 
 export function fetchWeekSchedule(dateKeys, userId, isAdmin = false, userWorkTypes = null) {
