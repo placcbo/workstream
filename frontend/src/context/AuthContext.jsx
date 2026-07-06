@@ -114,9 +114,9 @@ export function AuthProvider({ children }) {
     };
   }, [refreshWorkTypeAccess]);
 
-  // Fetch projects from backend when user logs in
+  // Fetch projects from backend when an admin logs in
   useEffect(() => {
-    if (!user?.id) {
+    if (!user?.id || user?.role !== "admin") {
       setCustomWorkTypes([]);
       return;
     }
@@ -133,7 +133,7 @@ export function AuthProvider({ children }) {
     return () => {
       cancelled = true;
     };
-  }, [user?.id]);
+  }, [user?.id, user?.role]);
 
   /** Grant a user (by email) access to an additional work type/project. Backend is the source of truth. */
   const grantWorkTypeAccess = useCallback(async (email, workType) => {

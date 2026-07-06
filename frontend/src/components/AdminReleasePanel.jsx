@@ -186,14 +186,7 @@ export default function AdminReleasePanel({
             <select
               className="arp-input arp-select"
               value={workType || ""}
-              value={maxHoursPerUser}
-              onChange={(e) => {
-                const v = Number(e.target.value) || 0;
-                setMaxHoursPerUser(Math.max(1, Math.min(24, v)));
-              }}
-                  setWorkType(e.target.value);
-                }
-              }}
+              onChange={(e) => setWorkType(e.target.value)}
             >
               {!workType && <option value="">Select a project…</option>}
               {allWorkTypes.map((wt) => (
