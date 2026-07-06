@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -137,6 +138,70 @@ func withCORS(fn http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		fn(w, r)
+	}
+}
+
+type rateLimiterEntry struct {
+	count     int
+	windowEnd time.Time
+}
+
+type rateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*rateLimiterEntry
+	limit   int
+	window  time.Duration
+}
+
+func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	return &rateLimiter{
+		entries: make(map[string]*rateLimiterEntry),
+		limit:   limit,
+		window:  window,
+	}
+}
+
+func (rl *rateLimiter) allow(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	entry, ok := rl.entries[key]
+	now := time.Now()
+	if !ok || now.After(entry.windowEnd) {
+		rl.entries[key] = &rateLimiterEntry{count: 1, windowEnd: now.Add(rl.window)}
+		return true
+	}
+	if entry.count >= rl.limit {
+		return false
+	}
+	entry.count++
+	return true
+}
+
+func getRemoteIP(r *http.Request) string {
+	if addr := r.Header.Get("X-Forwarded-For"); addr != "" {
+		parts := strings.Split(addr, ",")
+		if len(parts) > 0 {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	if addr := r.Header.Get("X-Real-IP"); addr != "" {
+		return strings.TrimSpace(addr)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func withRateLimit(fn http.HandlerFunc, rl *rateLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		remoteIP := getRemoteIP(r)
+		if !rl.allow(remoteIP) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "rate limit exceeded"})
 			return
 		}
 		fn(w, r)
@@ -1676,6 +1741,8 @@ func main() {
 		defaultAdminInviteCode = envCode
 	}
 
+	authRateLimiter := newRateLimiter(5, time.Minute)
+
 	http.HandleFunc("/api/week-range", withCORS(handleWeekRange))
 	http.HandleFunc("/api/week-schedule", withCORS(handleWeekSchedule))
 	http.HandleFunc("/api/user-hours", withCORS(handleUserHours))
@@ -1695,9 +1762,9 @@ func main() {
 	http.HandleFunc("/api/timer", withCORS(handleTimerRouter))
 	http.HandleFunc("/api/timer/start", withCORS(handleStartTimer))
 	http.HandleFunc("/api/timer/stop", withCORS(handleStopTimer))
-	http.HandleFunc("/api/register", withCORS(handleRegister))
+	http.HandleFunc("/api/register", withCORS(withRateLimit(handleRegister, authRateLimiter)))
 	http.HandleFunc("/api/session", withCORS(handleSessionRouter))
-	http.HandleFunc("/api/session/login", withCORS(handleSessionLogin))
+	http.HandleFunc("/api/session/login", withCORS(withRateLimit(handleSessionLogin, authRateLimiter)))
 	http.HandleFunc("/api/session/logout", withCORS(handleSessionLogout))
 
 	addr := ":8080"
