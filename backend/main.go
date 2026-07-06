@@ -378,11 +378,12 @@ func handleWeekRange(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleWeekSchedule(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
-		DateKeys      []string `json:"dateKeys"`
-		UserID        string   `json:"userId"`
-		IsAdmin       bool     `json:"isAdmin"`
-		UserWorkTypes []string `json:"userWorkTypes"`
+		DateKeys []string `json:"dateKeys"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -397,26 +398,24 @@ func handleWeekSchedule(w http.ResponseWriter, r *http.Request) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
+	allowedWorkTypes := map[string]struct{}{}
+	if account.Role != "admin" {
+		for _, wt := range resolveGrantedWorkTypesForEmail(account.Email, account.DefaultWorkTypes) {
+			allowedWorkTypes[wt] = struct{}{}
+		}
+	}
+
 	for _, dateKey := range payload.DateKeys {
 		blocks := make([]BlockResponse, 0)
 		for _, block := range store.releaseBlocks[dateKey] {
-			serialized := serializeBlock(block, payload.UserID)
-			// If caller is admin, only show blocks owned by that admin.
-			if payload.IsAdmin {
-				if block.OwnerID == payload.UserID {
-					blocks = append(blocks, serialized)
+			if account.Role == "admin" {
+				if block.OwnerID == account.ID {
+					blocks = append(blocks, serializeBlock(block, account.ID))
 				}
 				continue
 			}
-			if payload.UserWorkTypes == nil {
-				blocks = append(blocks, serialized)
-				continue
-			}
-			for _, workType := range payload.UserWorkTypes {
-				if workType == block.WorkType {
-					blocks = append(blocks, serialized)
-					break
-				}
+			if _, ok := allowedWorkTypes[block.WorkType]; ok {
+				blocks = append(blocks, serializeBlock(block, account.ID))
 			}
 		}
 		releasedHours := 0
@@ -1101,8 +1100,7 @@ func handleAddProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		AdminId string `json:"adminId"`
-		Name    string `json:"name"`
+		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
@@ -1120,15 +1118,15 @@ func handleAddProject(w http.ResponseWriter, r *http.Request) {
 	// case-insensitively so "hubdoc" and "Hubdoc" are treated as the same
 	// project rather than silently creating a duplicate; the existing entry's
 	// original casing is kept since blocks already reference that string.
-	projects := store.projects[req.AdminId]
+	projects := store.projects[adminId]
 	for _, p := range projects {
 		if strings.EqualFold(p, name) {
 			writeJSON(w, http.StatusOK, projects)
 			return
 		}
 	}
-	store.projects[req.AdminId] = append(projects, name)
-	writeJSON(w, http.StatusOK, store.projects[req.AdminId])
+	store.projects[adminId] = append(projects, name)
+	writeJSON(w, http.StatusOK, store.projects[adminId])
 }
 
 // handleProjectsRouter dispatches /api/projects: GET lists an admin's
