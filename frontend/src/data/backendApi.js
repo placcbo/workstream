@@ -1,4 +1,13 @@
 const BASE_URL = import.meta.env?.VITE_API_URL || "http://localhost:8080/api";
+const SESSION_STORAGE_KEY = "sessionId";
+
+function getSessionId() {
+  try {
+    return localStorage.getItem(SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
 
 async function readResponsePayload(response) {
   const contentType = response.headers.get("content-type") || "";
@@ -10,9 +19,14 @@ async function readResponsePayload(response) {
 }
 
 async function callApi(path, body, method = "POST") {
+  const headers = { "Content-Type": "application/json" };
+  const sessionId = getSessionId();
+  if (sessionId) {
+    headers["X-Session-Id"] = sessionId;
+  }
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body != null ? JSON.stringify(body) : undefined,
   });
 

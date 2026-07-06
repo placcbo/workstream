@@ -520,9 +520,12 @@ func summarizeDateForOwner(dateKey, ownerID string) Summary {
 }
 
 func handleAdminCapacitySummary(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireAdminAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
 		DateKeys []string `json:"dateKeys"`
-		OwnerID  string   `json:"ownerId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -531,13 +534,17 @@ func handleAdminCapacitySummary(w http.ResponseWriter, r *http.Request) {
 	response := make(map[string]Summary)
 	store.mu.Lock()
 	for _, dateKey := range payload.DateKeys {
-		response[dateKey] = summarizeDateForOwner(dateKey, payload.OwnerID)
+		response[dateKey] = summarizeDateForOwner(dateKey, account.ID)
 	}
 	store.mu.Unlock()
 	writeJSON(w, http.StatusOK, response)
 }
 
 func handleReleaseHours(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireAdminAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
 		DateKey         string `json:"dateKey"`
 		TotalHours      int    `json:"totalHours"`
@@ -547,7 +554,6 @@ func handleReleaseHours(w http.ResponseWriter, r *http.Request) {
 		StartTime       string `json:"startTime"`
 		EndTime         string `json:"endTime"`
 		WorkType        string `json:"workType"`
-		OwnerID         string `json:"ownerId"`
 		MaxHoursPerUser int    `json:"maxHoursPerUser"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -560,7 +566,7 @@ func handleReleaseHours(w http.ResponseWriter, r *http.Request) {
 	if payload.BlockSize < 1 {
 		payload.BlockSize = 1
 	}
-	created := addRelease(payload.DateKey, payload.TotalHours, payload.BlockSize, payload.StartSlot, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, payload.OwnerID, payload.MaxHoursPerUser)
+	created := addRelease(payload.DateKey, payload.TotalHours, payload.BlockSize, payload.StartSlot, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, account.ID, payload.MaxHoursPerUser)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": created})
 }
 
@@ -646,6 +652,10 @@ func recurringDateKeys(startDate, endDate time.Time, frequency string, weekdays 
 }
 
 func handleReleaseHoursRecurring(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireAdminAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
 		StartDate       string `json:"startDate"`
 		EndDate         string `json:"endDate"`
@@ -656,7 +666,6 @@ func handleReleaseHoursRecurring(w http.ResponseWriter, r *http.Request) {
 		StartTime       string `json:"startTime"`
 		EndTime         string `json:"endTime"`
 		WorkType        string `json:"workType"`
-		OwnerID         string `json:"ownerId"`
 		MaxHoursPerUser int    `json:"maxHoursPerUser"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -734,7 +743,7 @@ func handleReleaseHoursRecurring(w http.ResponseWriter, r *http.Request) {
 		if i < remainder {
 			hoursForDate++
 		}
-		created := addRelease(dateKey, hoursForDate, hoursForDate, 0, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, payload.OwnerID, payload.MaxHoursPerUser)
+		created := addRelease(dateKey, hoursForDate, hoursForDate, 0, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, account.ID, payload.MaxHoursPerUser)
 		createdByDate[dateKey] = created
 		totalBlocksCreated += len(created)
 	}
@@ -750,6 +759,10 @@ func handleReleaseHoursRecurring(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
+	_, ok := requireAdminAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
 		DateKey         string `json:"dateKey"`
 		BlockID         string `json:"blockId"`
@@ -824,6 +837,10 @@ func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRevokeBlock(w http.ResponseWriter, r *http.Request) {
+	_, ok := requireAdminAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
 		DateKey string `json:"dateKey"`
 		BlockID string `json:"blockId"`
@@ -851,6 +868,10 @@ func handleRevokeBlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleReserveHours(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
 		DateKey        string `json:"dateKey"`
 		BlockID        string `json:"blockId"`
@@ -862,6 +883,7 @@ func handleReserveHours(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
+	payload.UserID = account.ID
 	if payload.Hours < 1 {
 		payload.Hours = 1
 	}
@@ -906,6 +928,10 @@ func handleReserveHours(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
 		BookingID      string `json:"bookingId"`
 		Hours          int    `json:"hours"`
@@ -916,6 +942,7 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
+	payload.UserID = account.ID
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	var target *Booking
@@ -997,6 +1024,10 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleCancelBooking(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
 		BookingID string `json:"bookingId"`
 		UserID    string `json:"userId"`
@@ -1005,6 +1036,7 @@ func handleCancelBooking(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
+	payload.UserID = account.ID
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	idx := -1
@@ -1048,11 +1080,11 @@ func handleCancelBooking(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/projects?adminId=xxx returns projects for that admin
 func handleGetProjects(w http.ResponseWriter, r *http.Request) {
-	adminId := r.URL.Query().Get("adminId")
-	if adminId == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "adminId required"})
+	account, ok := requireAdminAccount(w, r)
+	if !ok {
 		return
 	}
+	adminId := account.ID
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	projects := store.projects[adminId]
@@ -1064,6 +1096,10 @@ func handleGetProjects(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/projects adds a new project for the admin
 func handleAddProject(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireAdminAccount(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		AdminId string `json:"adminId"`
 		Name    string `json:"name"`
@@ -1073,10 +1109,11 @@ func handleAddProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
-	if req.AdminId == "" || name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "adminId and name required"})
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name required"})
 		return
 	}
+	adminId := account.ID
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	// Check if project already exists for this admin. Compared
@@ -1136,6 +1173,10 @@ func findWorkTypeKey(workType string) string {
 
 // POST /api/work-type-access/grant { email, workType }
 func handleGrantWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
+	_, ok := requireAdminAccount(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		Email    string `json:"email"`
 		WorkType string `json:"workType"`
@@ -1176,6 +1217,10 @@ func handleGrantWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/work-type-access/revoke { email, workType }
 func handleRevokeWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
+	_, ok := requireAdminAccount(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		Email    string `json:"email"`
 		WorkType string `json:"workType"`
@@ -1216,11 +1261,11 @@ func handleRevokeWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 // Also auto-stops (and banks) any timer that's been running implausibly
 // long, mirroring the client's previous stale-timer recovery logic.
 func handleGetTimer(w http.ResponseWriter, r *http.Request) {
-	userID := r.URL.Query().Get("userId")
-	if userID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "userId required"})
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
 		return
 	}
+	userID := account.ID
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	timer := store.timers[userID]
@@ -1257,6 +1302,10 @@ func handleGetTimer(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/timer/start { userId, taskName, bookingId, blockId, dateKey }
 func handleStartTimer(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		UserID    string `json:"userId"`
 		TaskName  string `json:"taskName"`
@@ -1268,10 +1317,7 @@ func handleStartTimer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
 		return
 	}
-	if req.UserID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "userId required"})
-		return
-	}
+	req.UserID = account.ID
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	timer := &Timer{
@@ -1290,6 +1336,10 @@ func handleStartTimer(w http.ResponseWriter, r *http.Request) {
 // elapsed time into reportedOverride (added to completed-booking hours to
 // form the user's effective reported hours).
 func handleStopTimer(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		UserID               string   `json:"userId"`
 		ClientElapsedSeconds *float64 `json:"clientElapsedSeconds"`
@@ -1298,6 +1348,7 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
 		return
 	}
+	req.UserID = account.ID
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	timer := store.timers[req.UserID]
@@ -1366,6 +1417,44 @@ var activeSessions = struct {
 	mu sync.Mutex
 	m  map[string]sessionAccount
 }{m: make(map[string]sessionAccount)}
+
+func getSessionAccount(r *http.Request) (*sessionAccount, bool) {
+	sessionID := r.Header.Get("X-Session-Id")
+	if sessionID == "" {
+		sessionID = r.URL.Query().Get("sessionId")
+	}
+	if sessionID == "" {
+		return nil, false
+	}
+	activeSessions.mu.Lock()
+	account, ok := activeSessions.m[sessionID]
+	activeSessions.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	return &account, true
+}
+
+func requireSessionAccount(w http.ResponseWriter, r *http.Request) (*sessionAccount, bool) {
+	account, ok := getSessionAccount(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return nil, false
+	}
+	return account, true
+}
+
+func requireAdminAccount(w http.ResponseWriter, r *http.Request) (*sessionAccount, bool) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return nil, false
+	}
+	if account.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+		return nil, false
+	}
+	return account, true
+}
 
 func resolveGrantedWorkTypesForEmail(email string, defaultWorkTypes []string) []string {
 	normalizedEmail := normalizeEmail(email)
