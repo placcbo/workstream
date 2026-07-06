@@ -115,9 +115,9 @@ export default function AdminReleasePanel({
         setWorkType(allWorkTypes[0]);
       }
     }
-  }, [allWorkTypes.join(",")]);
+  }, [allWorkTypes.join(","), workType]);
 
-  // When a new project is highlighted (just created), auto-select it
+  const canReleaseWithCap = canRelease && (maxHoursPerUser >= 1 && maxHoursPerUser <= 24);
   useEffect(() => {
     if (highlightedProject && customWorkTypes.includes(highlightedProject)) {
       setWorkType(highlightedProject);
@@ -186,8 +186,11 @@ export default function AdminReleasePanel({
             <select
               className="arp-input arp-select"
               value={workType || ""}
+              value={maxHoursPerUser}
               onChange={(e) => {
-                if (e.target.value) {
+                const v = Number(e.target.value) || 0;
+                setMaxHoursPerUser(Math.max(1, Math.min(24, v)));
+              }}
                   setWorkType(e.target.value);
                 }
               }}

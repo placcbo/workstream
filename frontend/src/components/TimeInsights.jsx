@@ -11,9 +11,11 @@ export default function TimeInsights({
   todayByProject = [],
 }) {
   const capacity = Math.max(isAdmin ? releasedHours : MAX_HOURS_PER_DAY * daysInRange * projectCount, 1);
-  const reportedPct = Math.min(100, (reportedHours / capacity) * 100);
+  const reportedPctRaw = (reportedHours / capacity) * 100;
+  const reportedPct = Math.max(0, Math.min(100, reportedPctRaw));
   const upcomingHours = Math.max(0, reservedHours - reportedHours);
-  const upcomingPct = Math.min(100 - reportedPct, (upcomingHours / capacity) * 100);
+  const upcomingPctRaw = (upcomingHours / capacity) * 100;
+  const upcomingPct = Math.max(0, Math.min(100 - reportedPct, upcomingPctRaw));
 
   return (
     <div className="time-insights">
