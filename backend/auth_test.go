@@ -95,3 +95,53 @@ func TestRegisterRejectsShortPassword(t *testing.T) {
 		t.Fatalf("expected 400 for short password, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestSessionLoginRejectsClientSuppliedAccount(t *testing.T) {
+	store = &Store{
+		releaseBlocks:    make(map[string][]Block),
+		projects:         make(map[string][]string),
+		workTypeAccess:   make(map[string][]string),
+		users:            make(map[string]User),
+		timers:           make(map[string]*Timer),
+		reportedOverride: make(map[string]float64),
+		bookingBanked:    make(map[string]float64),
+		nextBlockID:      100,
+		nextBookingID:    100,
+		nextUserID:       1,
+	}
+	activeSessions = struct {
+		mu sync.Mutex
+		m  map[string]sessionAccount
+	}{m: make(map[string]sessionAccount)}
+
+	registerReq := map[string]any{
+		"name":       "Test User",
+		"email":      "bypass@example.com",
+		"password":   "secret123",
+		"role":       "user",
+		"inviteCode": "",
+	}
+	body, _ := json.Marshal(registerReq)
+	req := httptest.NewRequest("POST", "/api/register", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handleRegister(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("expected 201 registering user, got %d", rec.Code)
+	}
+
+	loginReq := map[string]any{
+		"account": map[string]any{
+			"id":    "user-1",
+			"email": "bypass@example.com",
+			"role":  "user",
+		},
+	}
+	body, _ = json.Marshal(loginReq)
+	req = httptest.NewRequest("POST", "/api/session/login", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+
+	handleSessionLogin(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for client-supplied account bypass, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}

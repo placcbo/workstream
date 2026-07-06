@@ -1549,42 +1549,36 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 // creates a session for the stored user.
 func handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Account  sessionAccount `json:"account"`
-		Email    string         `json:"email"`
-		Password string         `json:"password"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
 		return
 	}
 
-	var account sessionAccount
-	if req.Account.ID != "" {
-		account = req.Account
-	} else {
-		email := normalizeEmail(req.Email)
-		password := req.Password
-		if email == "" || password == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "email and password are required"})
-			return
-		}
+	email := normalizeEmail(req.Email)
+	password := req.Password
+	if email == "" || password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "email and password are required"})
+		return
+	}
 
-		store.mu.Lock()
-		user, exists := store.users[email]
-		store.mu.Unlock()
-		if !exists || !passwordMatches(user.PasswordHash, password) {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid email or password"})
-			return
-		}
+	store.mu.Lock()
+	user, exists := store.users[email]
+	store.mu.Unlock()
+	if !exists || !passwordMatches(user.PasswordHash, password) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid email or password"})
+		return
+	}
 
-		account = sessionAccount{
-			ID:               user.ID,
-			Name:             user.Name,
-			Email:            user.Email,
-			AvatarURL:        user.AvatarURL,
-			Role:             user.Role,
-			DefaultWorkTypes: user.DefaultWorkTypes,
-		}
+	account := sessionAccount{
+		ID:               user.ID,
+		Name:             user.Name,
+		Email:            user.Email,
+		AvatarURL:        user.AvatarURL,
+		Role:             user.Role,
+		DefaultWorkTypes: user.DefaultWorkTypes,
 	}
 
 	sessionID := fmt.Sprintf("sess-%s-%d", account.ID, time.Now().UnixNano())
