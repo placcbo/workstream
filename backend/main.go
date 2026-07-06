@@ -119,7 +119,7 @@ var store = &Store{
 // later), we don't trust the elapsed time as real tracked work.
 const maxPlausibleTimerHours = 12
 
-var defaultAdminInviteCode = "workstream-admin-2026"
+var defaultAdminInviteCode string
 
 const dayStartHour = 8
 const slotsPerDay = 24
@@ -1588,9 +1588,15 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "role must be 'user' or 'admin'"})
 		return
 	}
-	if role == "admin" && req.InviteCode != defaultAdminInviteCode {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid invite code"})
-		return
+	if role == "admin" {
+		if defaultAdminInviteCode == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "admin registration is disabled"})
+			return
+		}
+		if req.InviteCode != defaultAdminInviteCode {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid invite code"})
+			return
+		}
 	}
 
 	store.mu.Lock()

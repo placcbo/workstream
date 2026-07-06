@@ -9,6 +9,18 @@ import {
 
 const ROW_HEIGHT = 34;
 
+function blockEndSlot(block) {
+  const startHour = Number.parseInt((block.startTime ?? "08:00").split(":")[0], 10);
+  const startMin = Number.parseInt(((block.startTime ?? "08:00").split(":")[1]) ?? "0", 10);
+  const endHour = Number.parseInt((block.endTime ?? "17:00").split(":")[0], 10);
+  const endMin = Number.parseInt(((block.endTime ?? "17:00").split(":")[1]) ?? "0", 10);
+  const startMins = startHour * 60 + startMin;
+  const endMinsRaw = endHour * 60 + endMin;
+  const durationMins = endMinsRaw > startMins ? endMinsRaw - startMins : 24 * 60 - startMins + endMinsRaw;
+  const durationHours = Math.max(1, durationMins / 60);
+  return block.startSlot + Math.ceil(durationHours);
+}
+
 export default function WeekGrid({
   dateKeys,
   weekData,
@@ -25,7 +37,7 @@ export default function WeekGrid({
   const maxRows = Math.max(
     SLOTS_PER_DAY,
     ...dateKeys.flatMap((dateKey) =>
-      (weekData[dateKey]?.blocks ?? []).map((block) => block.startSlot + Math.ceil(block.totalHours))
+      (weekData[dateKey]?.blocks ?? []).map((block) => blockEndSlot(block))
     )
   );
 

@@ -27,6 +27,7 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 		m  map[string]sessionAccount
 	}{m: make(map[string]sessionAccount)}
 
+	defaultAdminInviteCode = "test-admin-invite"
 	registerReq := map[string]any{
 		"name":       "Test Admin",
 		"email":      "admin@example.com",
@@ -114,6 +115,7 @@ func TestSessionLoginRejectsClientSuppliedAccount(t *testing.T) {
 		m  map[string]sessionAccount
 	}{m: make(map[string]sessionAccount)}
 
+	defaultAdminInviteCode = "test-admin-invite"
 	registerReq := map[string]any{
 		"name":       "Test User",
 		"email":      "bypass@example.com",
