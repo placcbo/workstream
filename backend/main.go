@@ -667,8 +667,12 @@ func addRelease(dateKey string, totalHours, blockSize, startSlot int, shiftName,
 			existing.StartTime == startTime && existing.EndTime == endTime {
 			existing.TotalHours += totalHours
 			existing.BlockSize = existing.TotalHours
+			// Only set/raise MaxHoursPerUser — don't silently lower it and
+			// risk orphaning or invalidating existing bookings.
 			if maxHoursPerUser > 0 {
-				existing.MaxHoursPerUser = maxHoursPerUser
+				if existing.MaxHoursPerUser == 0 || maxHoursPerUser > existing.MaxHoursPerUser {
+					existing.MaxHoursPerUser = maxHoursPerUser
+				}
 			}
 			store.releaseBlocks[dateKey] = current
 			return []Block{*existing}
@@ -902,6 +906,19 @@ func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
 			current[i].WorkType = payload.WorkType
 		}
 		if payload.MaxHoursPerUser > 0 {
+			// Ensure lowering the per-user cap doesn't invalidate existing
+			// reservations: compute per-user reserved hours on this block and
+			// reject the change if any user already exceeds the requested cap.
+			userSums := make(map[string]int)
+			for _, b := range getBlockBookings(current[i].ID) {
+				userSums[b.UserID] += b.Hours
+			}
+			for uid, sum := range userSums {
+				if sum > payload.MaxHoursPerUser {
+					writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't set maxHoursPerUser to %dh — user %s already has %dh reserved on this block.", payload.MaxHoursPerUser, uid, sum)})
+					return
+				}
+			}
 			current[i].MaxHoursPerUser = payload.MaxHoursPerUser
 		}
 		updatedBlock = &current[i]
