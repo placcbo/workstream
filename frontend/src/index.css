@@ -1,32 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-:root {
-  --ledger-bg: #1B2B22;
-  --ledger-bg-raised: #233A2C;
-  --paper: #F4EFE4;
-  --paper-dim: #E6DFCF;
-  --ink: #23211D;
-  --ink-soft: #5C5848;
-  --amber: #E8A33D;
-  --amber-dim: #B97E29;
-  --lime: #8BD24A;
-  --lime-dim: #4E842D;
-  --sky: #79C7DD;
-  --teal: #3D8C7D;
-  --teal-dim: #2C6457;
-  --rust: #C1502E;
-  --rust-dim: #8E3A21;
-  --slate: #6B7A8F;
-  --slate-dim: #4D5A6B;
-  --line: rgba(244, 239, 228, 0.12);
-  --line-strong: rgba(244, 239, 228, 0.22);
-
-  --font-display: 'Archivo', sans-serif;
-  --font-body: 'Inter', sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
-
-  color-scheme: dark;
-}
+/* Design variables moved to app.css to avoid conflicting definitions.
+   Keep font import above so referenced fonts are available. */
 
 * {
   box-sizing: border-box;

@@ -42,69 +42,9 @@ const SESSION_STORAGE_KEY = "sessionId";
 
 export const WORK_TYPES = [];
 
-export const MOCK_ACCOUNTS = [
-  {
-    id: "demo-user-1",
-    name: "Amina Njeri",
-    email: "amina.njeri@gmail.com",
-    avatarUrl: "https://i.pravatar.cc/100?img=47",
-    role: "user",
-    defaultWorkTypes: [],
-  },
-  {
-    id: "demo-user-2",
-    name: "Kipkoech Otieno",
-    email: "kipkoech.otieno@gmail.com",
-    avatarUrl: "https://i.pravatar.cc/100?img=12",
-    role: "user",
-    defaultWorkTypes: [],
-  },
-  {
-    id: "demo-user-3",
-    name: "Wanjiku Muiruri",
-    email: "wanjiku.muiruri@gmail.com",
-    avatarUrl: "https://i.pravatar.cc/100?img=32",
-    role: "user",
-    defaultWorkTypes: [],
-  },
-  {
-    id: "demo-user-4",
-    name: "Mwangi Kamau",
-    email: "mwangi.kamau@gmail.com",
-    avatarUrl: "https://i.pravatar.cc/100?img=56",
-    role: "user",
-    defaultWorkTypes: [],
-  },
-  {
-    id: "demo-user-5",
-    name: "Nadia Akinyi",
-    email: "nadia.akinyi@gmail.com",
-    avatarUrl: "https://i.pravatar.cc/100?img=15",
-    role: "user",
-    defaultWorkTypes: [],
-  },
-  {
-    id: "demo-user-6",
-    name: "Daniel Mutua",
-    email: "daniel.mutua@gmail.com",
-    avatarUrl: "https://i.pravatar.cc/100?img=24",
-    role: "user",
-    defaultWorkTypes: [],
-  },
-  {
-    id: "admin-1",
-    name: "Foreman (Admin)",
-    email: "foreman@worksite.com",
-    avatarUrl: "https://i.pravatar.cc/100?img=68",
-    role: "admin",
-  },
-  {
-    id: "admin-2",
-    name: "Kevin Ndirangu (Admin)",
-    email: "kevin.ndirangu@labelyourdata.com",
-    role: "admin",
-  },
-];
+// `MOCK_ACCOUNTS` removed — authentication now uses the backend session
+// exclusively. Keep this file free of exported demo accounts to avoid any
+// accidental client-side auth bypasses.
 
 const AuthContext = createContext(null);
 
