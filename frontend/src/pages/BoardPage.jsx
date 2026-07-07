@@ -296,6 +296,26 @@ export default function BoardPage() {
     }
   }, [showReservedBlocks, anchorDate, loadWeek, dateKeys.length, weekData]);
 
+  useEffect(() => {
+    const closeActiveDialog = () => {
+      if (showReservedBlocks) setShowReservedBlocks(false);
+      if (adminAdjustTarget) setAdminAdjustTarget(null);
+      if (pendingBlock) handleClearPending();
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key !== "Escape") return;
+      closeActiveDialog();
+    };
+
+    if (showReservedBlocks || adminAdjustTarget || pendingBlock) {
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }
+
+    return undefined;
+  }, [showReservedBlocks, adminAdjustTarget, pendingBlock, handleClearPending]);
+
   // Computes the real start/end Date objects for a shift window, handling
   // overnight shifts (e.g. "16:00" -> "00:00" or "22:00" -> "02:00") by
   // rolling the end time to the next calendar day whenever endTime is not
@@ -1046,7 +1066,7 @@ export default function BoardPage() {
 
       <main className="board-main board-main--week">
         {showReservedBlocks && (
-          <div className="reserved-blocks-overlay" role="dialog" aria-modal="true" onClick={() => setShowReservedBlocks(false)}>
+          <div className="reserved-blocks-overlay" role="dialog" aria-modal="true" aria-labelledby="reservedBlocksTitle" onClick={() => setShowReservedBlocks(false)}>
             <div className="reserved-blocks-panel" onClick={(event) => event.stopPropagation()}>
               <button
                 type="button"
@@ -1054,9 +1074,27 @@ export default function BoardPage() {
                 onClick={() => setShowReservedBlocks(false)}
                 aria-label="Close"
                 title="Close"
+                autoFocus
               >
                 ✕
               </button>
+              <div className="reserved-blocks-titlebar">
+                <h2 id="reservedBlocksTitle">Reserved blocks</h2>
+                <button
+                  className="btn btn--ghost reserved-blocks-refresh"
+                  disabled={isRefreshingReserved}
+                  onClick={handleRefreshReservedBlocks}
+                >
+                  {isRefreshingReserved ? (
+                    <>
+                      <span className="reserved-button-spinner" aria-hidden="true" />
+                      Refreshing...
+                    </>
+                  ) : (
+                    "Refresh"
+                  )}
+                </button>
+              </div>
               <div className="reserved-blocks-modal-grid">
                 <div className="reserved-timer-card">
                   <div className="reserved-timer-header">
@@ -1344,9 +1382,9 @@ export default function BoardPage() {
 
           {/* ── Admin: adjust released block hours (increase OR decrease) ── */}
           {adminAdjustTarget && (
-            <div className="claim-modal-overlay" role="dialog" aria-modal="true">
+            <div className="claim-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="adminAdjustModalTitle">
               <div className="claim-modal">
-                <div className="claim-modal-title">Adjust released hours</div>
+                <div id="adminAdjustModalTitle" className="claim-modal-title">Adjust released hours</div>
                 <p className="claim-modal-sub">
                   Increase or decrease the released capacity for this block. You cannot reduce below the hours
                   already reserved ({adminAdjustTarget.reservedHours}h).
@@ -1409,7 +1447,7 @@ export default function BoardPage() {
                 </div>
               ) : (
                 <div className="claim-modal">
-                  <div className="claim-modal-title">
+                  <div id="pendingClaimModalTitle" className="claim-modal-title">
                     {pendingClaim.mode === "adjust" ? "Adjust your reservation" : "Claim this block"}
                   </div>
 
@@ -1454,7 +1492,7 @@ export default function BoardPage() {
                     </small>
                   </label>
                   <div className="claim-modal-actions">
-                    <button className="btn btn--ghost" onClick={handleClearPending}>
+                    <button className="btn btn--ghost" onClick={handleClearPending} autoFocus>
                       Cancel
                     </button>
                     <button className="btn btn--teal" disabled={overBudget || submitting} onClick={handleConfirm}>
@@ -1475,23 +1513,20 @@ export default function BoardPage() {
           )}
 
           <div className="board-week-grid-wrap">
-            {loading && Object.keys(weekData).length === 0 ? (
-              <div className="ledger-loading">Loading the week...</div>
-            ) : (
-              <WeekGrid
-                dateKeys={dateKeys}
-                weekData={weekData}
-                pendingClaim={pendingClaim}
-                projectFilter={adminProjectFilter}
-                onSelectBlock={handleSelectBlock}
-                onCancelBooking={handleCancelBooking}
-                visibleLayers={visibleLayers}
-                todayKey={todayKey}
-                isAdmin={isAdmin}
-                onRevokeBlock={handleRevokeBlock}
-                disabled={submitting}
-              />
-            )}
+            <WeekGrid
+              dateKeys={dateKeys}
+              weekData={weekData}
+              pendingClaim={pendingClaim}
+              projectFilter={adminProjectFilter}
+              onSelectBlock={handleSelectBlock}
+              onCancelBooking={handleCancelBooking}
+              visibleLayers={visibleLayers}
+              todayKey={todayKey}
+              isAdmin={isAdmin}
+              onRevokeBlock={handleRevokeBlock}
+              disabled={submitting}
+              loading={loading && Object.keys(weekData).length === 0}
+            />
           </div>
         </section>
 

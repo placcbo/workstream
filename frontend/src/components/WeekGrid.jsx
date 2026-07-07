@@ -33,7 +33,45 @@ export default function WeekGrid({
   isAdmin,
   onRevokeBlock,
   disabled,
+  loading,
 }) {
+  if (loading) {
+    const skeletonRows = SLOTS_PER_DAY;
+    return (
+      <div
+        className="week-grid week-grid--released week-grid--loading"
+        style={{ "--ledger-rows": skeletonRows }}
+        aria-busy="true"
+        aria-label="Loading schedule"
+      >
+        <div className="week-grid-corner" />
+        <div className="week-grid-day-headers">
+          {Array.from({ length: 7 }, (_, index) => (
+            <div key={index} className="week-grid-day-header week-grid-day-header--skeleton">
+              <span className="skeleton-line skeleton-line--short" aria-hidden="true" />
+              <span className="skeleton-line skeleton-line--medium" aria-hidden="true" />
+            </div>
+          ))}
+        </div>
+        <div className="week-grid-hour-rail">
+          {Array.from({ length: skeletonRows }, (_, row) => (
+            <div key={row} className="week-grid-hour-label skeleton-line skeleton-line--tiny" aria-hidden="true" />
+          ))}
+        </div>
+        <div className="week-grid-columns">
+          {Array.from({ length: 7 }, (_, dateIndex) => (
+            <div key={dateIndex} className="week-grid-column">
+              {Array.from({ length: skeletonRows }, (_, row) => (
+                <div key={row} className="week-grid-cell week-grid-cell--skeleton" style={{ height: ROW_HEIGHT }} aria-hidden="true" />
+              ))}
+              <div className="week-grid-column-skeleton-block" aria-hidden="true" />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   const maxRows = Math.max(
     SLOTS_PER_DAY,
     ...dateKeys.flatMap((dateKey) =>
@@ -160,6 +198,20 @@ export default function WeekGrid({
                 const laneWidth = `calc((100% - ${totalGutters}px) / ${laneCount})`;
                 const laneLeft = `calc(${GUTTER}px + ${lane} * (${laneWidth} + ${LANE_GAP}px))`;
 
+                const labelParts = [];
+                if (isAdmin) {
+                  labelParts.push(`${block.totalHours}h released`);
+                } else if (hasMyReservation) {
+                  labelParts.push(`${block.myHours || 0}h reserved`);
+                } else {
+                  labelParts.push(`${block.remainingHours || 0}h available`);
+                }
+                labelParts.push(`${block.startTime} to ${block.endTime}`);
+                if (block.workType) {
+                  labelParts.unshift(block.workType);
+                }
+                const accessibleLabel = `${labelParts.join(", ")} — ${block.shiftName || "Shift"}`;
+
                 return (
                   <button
                     key={block.id}
@@ -183,6 +235,7 @@ export default function WeekGrid({
                     data-work-type={block.workType}
                     disabled={disabled || (!isAdmin && ((!block.myHours && block.remainingHours <= 0) || isShiftOver))}
                     title={!isAdmin && isShiftOver ? "This shift has ended and can no longer be modified." : undefined}
+                    aria-label={accessibleLabel}
                     onClick={() => onSelectBlock(dateKey, block)}
                   >
                     <span className="calendar-capacity-fill" style={{ height: `${reservedPct}%` }} />
