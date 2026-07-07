@@ -1001,6 +1001,7 @@ export default function BoardPage() {
   const midWeekDate = dateKeys.length === 7 ? new Date(`${dateKeys[3]}T00:00:00`) : null;
   const weekHeading = midWeekDate ? formatMonthHeading(midWeekDate.getFullYear(), midWeekDate.getMonth()) : "";
   const rangeLabel = dateKeys.length === 7 ? `${formatDateHeading(dateKeys[0])} - ${formatDateHeading(dateKeys[6])}` : "";
+  const totalReleasedHours = dateKeys.reduce((sum, key) => sum + (weekData[key]?.summary?.releasedHours ?? 0), 0);
 
   // Max hours ceiling for the admin adjust slider — generous enough to let
   // admins increase a block, not just decrease it. We allow up to 3× the
@@ -1026,6 +1027,28 @@ export default function BoardPage() {
 
       <Header user={user} onLogout={logout} onShowReservedBlocks={() => setShowReservedBlocks(true)} timerRunning={timerRunning} />
 
+      <section className="board-summary-bar" aria-label="Week summary">
+        <div className="board-summary-item">
+          <span className="board-summary-label">Week</span>
+          <strong>{weekHeading}</strong>
+          <span className="board-summary-note">{rangeLabel}</span>
+        </div>
+        <div className="board-summary-item">
+          <span className="board-summary-label">Reported</span>
+          <strong>{effectiveReportedHours.toFixed(1)}h</strong>
+          <span className="board-summary-note">Incl. banked time</span>
+        </div>
+        <div className="board-summary-item">
+          <span className="board-summary-label">Reserved</span>
+          <strong>{summary.reservedHours.toFixed(1)}h</strong>
+          <span className="board-summary-note">Current week</span>
+        </div>
+        <div className="board-summary-item">
+          <span className="board-summary-label">Released</span>
+          <strong>{totalReleasedHours.toFixed(1)}h</strong>
+          <span className="board-summary-note">Visible schedule</span>
+        </div>
+      </section>
 
       <main className="board-main board-main--week">
         {showReservedBlocks && (

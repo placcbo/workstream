@@ -49,10 +49,22 @@ export default function LoginPage() {
         <p className="login-sub">Reserve your hours on the shared shift ledger.</p>
 
         <div className="login-mode-switch" role="tablist" aria-label="Authentication mode">
-          <button type="button" className={`login-mode-button ${mode === "login" ? "login-mode-button--active" : ""}`} onClick={() => setMode("login")}>
+<button
+            type="button"
+            role="tab"
+            aria-selected={mode === "login"}
+            className={`login-mode-button ${mode === "login" ? "login-mode-button--active" : ""}`}
+            onClick={() => setMode("login")}
+          >
             Log in
           </button>
-          <button type="button" className={`login-mode-button ${mode === "register" ? "login-mode-button--active" : ""}`} onClick={() => setMode("register")}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "register"}
+            className={`login-mode-button ${mode === "register" ? "login-mode-button--active" : ""}`}
+            onClick={() => setMode("register")}
+          >
             Register
           </button>
         </div>

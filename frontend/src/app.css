@@ -1958,6 +1958,55 @@ body {
 }
 
 /* ---------------------------------------------------------------------- */
+/* Board summary bar                                                      */
+/* ---------------------------------------------------------------------- */
+
+.board-summary-bar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0 auto 20px;
+  max-width: 980px;
+  width: 100%;
+  padding: 0 10px;
+}
+
+.board-summary-item {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.board-summary-label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--paper-dim);
+}
+
+.board-summary-note {
+  font-size: 0.84rem;
+  color: var(--paper-dim);
+}
+
+@media (max-width: 900px) {
+  .board-summary-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .board-summary-bar {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
 /* Week area                                                              */
 /* ---------------------------------------------------------------------- */
 
@@ -1980,7 +2029,12 @@ body {
   padding: 60px 16px;
   text-align: center;
   color: var(--paper-dim);
-  font-size: 0.85rem;
+  font-size: 0.95rem;
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(244, 239, 223, 0.03);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -2024,7 +2078,7 @@ body {
   align-items: center;
   justify-content: center;
   gap: 3px;
-  padding: 12px 6px;
+  padding: 10px 8px;
   border-left: 1px solid var(--line);
   min-height: 60px;
 }
@@ -2080,7 +2134,7 @@ body {
   grid-column: 2;
   grid-row: 2;
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   position: relative;
 }
 
@@ -2088,10 +2142,50 @@ body {
   position: relative;
   border-left: 1px solid var(--line);
   padding-top: 46px;
+  min-width: 0;
 }
 
 .week-grid-column:first-child {
   border-left: none;
+}
+
+@media (max-width: 780px) {
+  .week-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto 1fr;
+    max-height: none;
+  }
+
+  .week-grid-corner,
+  .week-grid-hour-rail,
+  .week-grid-day-headers {
+    position: static;
+  }
+
+  .week-grid-hour-rail {
+    display: none;
+  }
+
+  .week-grid-day-headers {
+    grid-column: 1;
+    grid-row: 2;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+
+  .week-grid-columns {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .week-grid-column {
+    border-left: none;
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+
+  .week-grid-column:first-child {
+    border-top: none;
+  }
 }
 
 .week-grid-cell {
@@ -2445,7 +2539,7 @@ body {
   color: var(--paper);
   box-shadow: none;
   z-index: 2;
-  transition: filter 0.12s ease;
+  transition: transform 0.12s ease, filter 0.12s ease, border-color 0.12s ease;
 }
 
 .calendar-capacity-block[data-work-type="Extraction"] {
@@ -2626,9 +2720,16 @@ body {
   pointer-events: none;
 }
 
-.calendar-capacity-block:not(:disabled):hover {
-  transform: none;
-  filter: brightness(1.15);
+.calendar-capacity-block:not(:disabled):hover,
+.calendar-capacity-block:not(:disabled):focus-visible {
+  transform: translateY(-1px);
+  filter: brightness(1.12);
+  border-color: var(--paper);
+}
+
+.calendar-capacity-block:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
 }
 
 .calendar-booking-block {
