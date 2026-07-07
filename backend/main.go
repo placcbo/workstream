@@ -1029,6 +1029,15 @@ func handleReserveHours(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Bug fix: the frontend disables claiming a block once its shift window
+	// has passed (WeekGrid's isShiftOver), but that was a client-only rule —
+	// nothing stopped a direct API call from reserving hours on a shift that
+	// already happened. Enforce the same rule handleCancelBooking and
+	// handleUpdateBookingHours apply, here, before any capacity is claimed.
+	if deriveShiftBookingStatus(payload.DateKey, block.StartTime, block.EndTime) == "completed" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "This shift has already ended and can no longer be claimed."})
+		return
+	}
 	remainingHours := remainingForBlock(block)
 	if payload.Hours > remainingHours {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Only %dh remain in this block.", remainingHours)})
@@ -1101,6 +1110,26 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("You've already worked %.2fh on this block — it can't be reduced below that.", worked)})
 		return
 	}
+	// Bug fix: this handler is also how the frontend cancels a reservation
+	// (by setting Hours to 0) — but unlike handleCancelBooking, it never
+	// checked whether the shift's time window had already passed. That let
+	// a direct call to update-booking-hours(0) cancel a booking for a shift
+	// that already happened, even though the equivalent /cancel-booking
+	// request is explicitly blocked below. Look the block up once, up front,
+	// and apply the same "shift already happened" rule to every change this
+	// endpoint makes, not just the ones that happen to route through
+	// /cancel-booking.
+	block := Block{}
+	for _, candidate := range store.releaseBlocks[target.DateKey] {
+		if candidate.ID == target.BlockID {
+			block = candidate
+			break
+		}
+	}
+	if payload.Hours != target.Hours && deriveShiftBookingStatus(target.DateKey, block.StartTime, block.EndTime) == "completed" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Can't change a reservation for a shift that already happened."})
+		return
+	}
 	if payload.Hours == 0 {
 		original := *target
 		next := make([]Booking, 0, len(store.bookings)-1)
@@ -1113,13 +1142,6 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 		store.bookings = next
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true, "booking": original})
 		return
-	}
-	block := Block{}
-	for _, candidate := range store.releaseBlocks[target.DateKey] {
-		if candidate.ID == target.BlockID {
-			block = candidate
-			break
-		}
 	}
 	otherBookingsOnBlock := 0
 	for _, booking := range store.bookings {
@@ -1436,6 +1458,26 @@ func handleTimerRouter(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// bankTimerSeconds banks `cappedSeconds` worth of elapsed work for `timer`
+// into reportedOverride (and bookingBanked, if the timer was tied to a
+// specific booking), removes it from store.timers, and returns the hours
+// added. Callers must hold store.mu and must have already computed/capped
+// the elapsed seconds themselves.
+func bankTimerSeconds(userID string, timer *Timer, cappedSeconds float64) float64 {
+	addedHours := math.Round((cappedSeconds/3600)*100) / 100
+	// Bank elapsed hours immediately, even for booking-tied timers — partial
+	// work should show up in reported hours right away rather than waiting
+	// for the whole shift to complete. See handleUserHoursSummary for how
+	// double-counting against the eventual completed-booking hours is
+	// avoided via store.bookingBanked.
+	store.reportedOverride[userID] += addedHours
+	if timer.BookingID != "" {
+		store.bookingBanked[timer.BookingID] += addedHours
+	}
+	delete(store.timers, userID)
+	return addedHours
+}
+
 // POST /api/timer/start { userId, taskName, bookingId, blockId, dateKey }
 func handleStartTimer(w http.ResponseWriter, r *http.Request) {
 	account, ok := requireSessionAccount(w, r)
@@ -1456,6 +1498,20 @@ func handleStartTimer(w http.ResponseWriter, r *http.Request) {
 	req.UserID = account.ID
 	store.mu.Lock()
 	defer store.mu.Unlock()
+
+	// Bug fix: previously this just did `store.timers[req.UserID] = timer`,
+	// silently discarding any timer already running for this user — e.g. a
+	// second tab/device calling start without stopping the first one first.
+	// Bank whatever was already accumulated (same accounting handleStopTimer
+	// uses) before replacing it, so no worked time is ever lost.
+	var previousTimerBanked *float64
+	if existing := store.timers[req.UserID]; existing != nil {
+		elapsedSeconds := float64(time.Now().UnixMilli()-existing.StartAt) / 1000
+		cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
+		added := bankTimerSeconds(req.UserID, existing, cappedSeconds)
+		previousTimerBanked = &added
+	}
+
 	timer := &Timer{
 		UserID:    req.UserID,
 		StartAt:   time.Now().UnixMilli(),
@@ -1465,7 +1521,14 @@ func handleStartTimer(w http.ResponseWriter, r *http.Request) {
 		DateKey:   req.DateKey,
 	}
 	store.timers[req.UserID] = timer
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "timer": timer})
+
+	resp := map[string]any{"ok": true, "timer": timer}
+	if previousTimerBanked != nil {
+		resp["previousTimerBanked"] = *previousTimerBanked
+		resp["bankedHours"] = store.reportedOverride[req.UserID]
+		resp["bookingBanked"] = bookingBankedForUser(req.UserID)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // POST /api/timer/stop { userId } — stops the active timer and banks the
@@ -1502,17 +1565,7 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 		elapsedSeconds = *req.ClientElapsedSeconds
 	}
 	cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
-	addedHours := math.Round((cappedSeconds/3600)*100) / 100
-	// Bank elapsed hours immediately, even for booking-tied timers — partial
-	// work should show up in reported hours right away rather than waiting
-	// for the whole shift to complete. See handleUserHoursSummary for how
-	// double-counting against the eventual completed-booking hours is
-	// avoided via store.bookingBanked.
-	store.reportedOverride[req.UserID] += addedHours
-	if timer.BookingID != "" {
-		store.bookingBanked[timer.BookingID] += addedHours
-	}
-	delete(store.timers, req.UserID)
+	addedHours := bankTimerSeconds(req.UserID, timer, cappedSeconds)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
 		"addedHours":    addedHours,

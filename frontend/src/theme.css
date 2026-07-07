@@ -1,0 +1,49 @@
+/* Theme and utilities overrides (light theme + small UI tweaks) */
+
+/* Light theme overrides applied by adding class `theme-light` to <html> */
+:root.theme-light {
+  --ink: #f6f7f8;
+  --ink-raised: #ffffff;
+  --ink-raised-2: #f0f2f1;
+  --paper: #07221b;
+  --paper-dim: #3b4a45;
+  --line: rgba(10, 18, 14, 0.06);
+  --line-strong: rgba(10, 18, 14, 0.12);
+
+  --signal: #c43b32;
+  --signal-dim: rgba(196, 59, 50, 0.12);
+  --signal-line: rgba(196, 59, 50, 0.24);
+
+  --amber: #b28f2b;
+  --amber-dim: rgba(178, 143, 43, 0.14);
+
+  --teal: #187056;
+  --teal-dim: rgba(24, 112, 86, 0.08);
+
+  --ledger-bg: var(--ink);
+  --ink-soft: #55645d;
+  color-scheme: light;
+}
+
+/* Small visual improvements kept separate from the main design file */
+.login-card {
+  box-shadow: 0 10px 30px rgba(10,18,14,0.12);
+}
+.auth-input { padding: 14px; }
+
+/* Theme toggle button */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--paper-dim);
+  font-size: 1rem;
+  cursor: pointer;
+  margin-left: 6px;
+}
+.theme-toggle:hover { border-color: var(--line-strong); color: var(--paper); }

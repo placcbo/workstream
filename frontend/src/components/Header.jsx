@@ -1,3 +1,5 @@
+import ThemeToggle from "./ThemeToggle";
+
 export default function Header({ user, onLogout, onShowReservedBlocks, timerRunning }) {
   // Bug fix: admin-2 (and any future account) may have no avatarUrl.
   // Render a text-initial avatar as a safe fallback instead of a broken <img>.
@@ -25,6 +27,7 @@ export default function Header({ user, onLogout, onShowReservedBlocks, timerRunn
           ⏱
         </button>
         <span>WorkBoard</span>
+        <ThemeToggle />
         {user.role === "admin" && <span className="role-badge">ADMIN</span>}
       </div>
       <div className="app-identity">
