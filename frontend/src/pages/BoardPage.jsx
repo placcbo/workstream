@@ -296,26 +296,6 @@ export default function BoardPage() {
     }
   }, [showReservedBlocks, anchorDate, loadWeek, dateKeys.length, weekData]);
 
-  useEffect(() => {
-    const closeActiveDialog = () => {
-      if (showReservedBlocks) setShowReservedBlocks(false);
-      if (adminAdjustTarget) setAdminAdjustTarget(null);
-      if (pendingBlock) handleClearPending();
-    };
-
-    const handleKeyDown = (event) => {
-      if (event.key !== "Escape") return;
-      closeActiveDialog();
-    };
-
-    if (showReservedBlocks || adminAdjustTarget || pendingBlock) {
-      window.addEventListener("keydown", handleKeyDown);
-      return () => window.removeEventListener("keydown", handleKeyDown);
-    }
-
-    return undefined;
-  }, [showReservedBlocks, adminAdjustTarget, pendingBlock, handleClearPending]);
-
   // Computes the real start/end Date objects for a shift window, handling
   // overnight shifts (e.g. "16:00" -> "00:00" or "22:00" -> "02:00") by
   // rolling the end time to the next calendar day whenever endTime is not
@@ -773,6 +753,26 @@ export default function BoardPage() {
     setPendingClaim(null);
     setCancelConfirmOpen(false);
   }, []);
+
+  useEffect(() => {
+    const closeActiveDialog = () => {
+      if (showReservedBlocks) setShowReservedBlocks(false);
+      if (adminAdjustTarget) setAdminAdjustTarget(null);
+      if (pendingBlock) handleClearPending();
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key !== "Escape") return;
+      closeActiveDialog();
+    };
+
+    if (showReservedBlocks || adminAdjustTarget || pendingBlock) {
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }
+
+    return undefined;
+  }, [showReservedBlocks, adminAdjustTarget, pendingBlock, handleClearPending]);
 
   const handleAdminAdjustHoursChange = useCallback((hours) => {
     setAdminAdjustTarget((current) => (current ? { ...current, targetHours: hours } : current));
