@@ -1341,9 +1341,21 @@ func findWorkTypeKey(workType string) string {
 	return ""
 }
 
+// adminOwnsProject reports whether the given admin has added workType to
+// their own project list (store.projects[adminID]), case-insensitively.
+// Callers must hold store.mu.
+func adminOwnsProject(adminID, workType string) bool {
+	for _, p := range store.projects[adminID] {
+		if strings.EqualFold(p, workType) {
+			return true
+		}
+	}
+	return false
+}
+
 // POST /api/work-type-access/grant { email, workType }
 func handleGrantWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
-	_, ok := requireAdminAccount(w, r)
+	account, ok := requireAdminAccount(w, r)
 	if !ok {
 		return
 	}
@@ -1363,6 +1375,10 @@ func handleGrantWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if !adminOwnsProject(account.ID, workType) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+		return
+	}
 	key := findWorkTypeKey(workType)
 	if key == "" {
 		key = workType
@@ -1387,7 +1403,7 @@ func handleGrantWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/work-type-access/revoke { email, workType }
 func handleRevokeWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
-	_, ok := requireAdminAccount(w, r)
+	account, ok := requireAdminAccount(w, r)
 	if !ok {
 		return
 	}
@@ -1403,6 +1419,10 @@ func handleRevokeWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 	workType := strings.TrimSpace(req.WorkType)
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if !adminOwnsProject(account.ID, workType) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+		return
+	}
 	key := findWorkTypeKey(workType)
 	if key != "" {
 		existing := store.workTypeAccess[key]
