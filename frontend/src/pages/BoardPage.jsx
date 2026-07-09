@@ -615,6 +615,11 @@ export default function BoardPage() {
       }));
   }, [weekData, user?.id, activeDate]);
 
+  const totalReservedHoursToday = useMemo(
+    () => reservedBlocks.reduce((sum, block) => sum + (block.myHours || 0), 0),
+    [reservedBlocks]
+  );
+
   // Step 7: the block currently being tracked, plus how much of its claimed
   // hours have been consumed so far — surfaced as a progress bar on the big
   // timer card itself, filling the space that used to sit empty below the
@@ -638,6 +643,18 @@ export default function BoardPage() {
     const liveWorked = banked + timerElapsedSeconds / 3600;
     return Math.min(100, Math.max(0, (liveWorked / activeTrackedBlock.myHours) * 100));
   }, [activeTrackedBlock, bookingBanked, timerBookingId, timerElapsedSeconds]);
+
+  // The timer card's duration pill: hours left on whatever's actively being
+  // tracked, or — when idle — the total across everything reserved today,
+  // so the pill is never just empty/meaningless the way a raw "0h" would be.
+  const timerCardPillHours = useMemo(() => {
+    if (activeTrackedBlock) {
+      const banked = timerBookingId != null ? (bookingBanked[timerBookingId] ?? 0) : 0;
+      const liveWorked = banked + timerElapsedSeconds / 3600;
+      return Math.max(0, activeTrackedBlock.myHours - liveWorked);
+    }
+    return totalReservedHoursToday;
+  }, [activeTrackedBlock, bookingBanked, timerBookingId, timerElapsedSeconds, totalReservedHoursToday]);
 
   const autoStopInFlightRef = useRef(false);
 
@@ -1189,25 +1206,8 @@ export default function BoardPage() {
               >
                 ✕
               </button>
-              <div className="reserved-blocks-titlebar">
-                <h2 id="reservedBlocksTitle">Reserved blocks</h2>
-                <button
-                  className="btn btn--ghost reserved-blocks-refresh"
-                  disabled={isRefreshingReserved}
-                  onClick={handleRefreshReservedBlocks}
-                >
-                  {isRefreshingReserved ? (
-                    <>
-                      <span className="reserved-button-spinner" aria-hidden="true" />
-                      Refreshing...
-                    </>
-                  ) : (
-                    "Refresh"
-                  )}
-                </button>
-              </div>
               <div className="reserved-blocks-modal-grid">
-                <div className="reserved-timer-card">
+                <div className={`reserved-timer-card ${timerRunning ? "reserved-timer-card--live" : ""}`}>
                   <div className="reserved-timer-header">
                     <div className="reserved-timer-user">
                       {user?.avatarUrl ? (
@@ -1248,13 +1248,22 @@ export default function BoardPage() {
                     )}
                     <div className="reserved-timer-body-text">
                       <div className="reserved-timer-clock">{formatSeconds(timerElapsedSeconds)}</div>
-                      {activeTrackedBlock && (
-                        <span className="reserved-timer-progress-label">
-                          {Math.max(0, activeTrackedBlock.myHours - (activeTrackedProgressPct / 100) * activeTrackedBlock.myHours).toFixed(2)}h left on {activeTrackedBlock.shiftName || activeTrackedBlock.workType}
-                        </span>
-                      )}
                     </div>
                   </div>
+
+                  {timerCardPillHours > 0 && (
+                    <div className="reserved-timer-pill">
+                      <span className="reserved-timer-pill-icon" aria-hidden="true">
+                        ⏱
+                      </span>
+                      {formatSeconds(Math.round(timerCardPillHours * 3600))}
+                      <span className="reserved-timer-pill-label">
+                        {activeTrackedBlock
+                          ? `left on ${activeTrackedBlock.shiftName || activeTrackedBlock.workType}`
+                          : "reserved today"}
+                      </span>
+                    </div>
+                  )}
 
                   <div className="reserved-timer-divider" />
 
@@ -1271,22 +1280,21 @@ export default function BoardPage() {
                 </div>
                 <div className={`reserved-blocks-right ${timerRunning ? "reserved-blocks-right--tracking" : ""}`}>
                   <div className="reserved-blocks-titlebar">
-                    <span>Reserved blocks</span>
+                    <h2 id="reservedBlocksTitle">Your reserved blocks</h2>
                     <button
-                      className="btn btn--ghost reserved-blocks-refresh"
+                      type="button"
+                      className="reserved-blocks-refresh"
                       disabled={isRefreshingReserved}
                       onClick={handleRefreshReservedBlocks}
+                      aria-label="Refresh reserved blocks"
+                      title="Refresh"
                     >
-                      {isRefreshingReserved ? (
-                        <>
-                          <span className="reserved-button-spinner" aria-hidden="true" />
-                          Refreshing...
-                        </>
-                      ) : (
-                        "Refresh"
-                      )}
+                      <span className={`reserved-blocks-refresh-icon ${isRefreshingReserved ? "reserved-blocks-refresh-icon--spinning" : ""}`} aria-hidden="true">
+                        ↻
+                      </span>
                     </button>
                   </div>
+                  <p className="reserved-blocks-sub">Start a timer on any block below to track your time.</p>
                   <div className="reserved-blocks-list">
                     {reservedBlocks.length === 0 ? (
                       <div className="reserved-blocks-empty">You have no reserved blocks today.</div>
@@ -1321,15 +1329,23 @@ export default function BoardPage() {
                         // label above the title when it actually adds information.
                         const displayTitle = block.shiftName || block.workType || "Shift";
                         const showEyebrow = Boolean(block.workType) && block.workType !== displayTitle;
+                        const isComplete = hasPriorWork && remainingHours <= 0.005;
                         return (
                         <div key={block.id} className={`reserved-block-card reserved-block-card--task ${isCurrentTask ? "reserved-block-card--active" : ""}`}>
                         <div className="reserved-block-card-header">
                           {showEyebrow && <div className="reserved-block-card-label">{block.workType}</div>}
-                          <div
-                            className={`reserved-block-card-title ${showEyebrow ? "" : "reserved-block-card-title--standalone"}`}
-                            title={displayTitle}
-                          >
-                            {displayTitle}
+                          <div className="reserved-block-card-title-row">
+                            <div
+                              className={`reserved-block-card-title ${showEyebrow ? "" : "reserved-block-card-title--standalone"}`}
+                              title={displayTitle}
+                            >
+                              {displayTitle}
+                            </div>
+                            {isComplete && (
+                              <span className="reserved-block-card-check" aria-label="Fully worked" title="Fully worked">
+                                ✓
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div className="reserved-block-card-meta">
