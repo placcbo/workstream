@@ -180,16 +180,12 @@ func (rl *rateLimiter) allow(key string) bool {
 	return true
 }
 
+// getRemoteIP returns the actual TCP peer address for rate-limiting
+// purposes. It deliberately ignores X-Forwarded-For/X-Real-IP: there is no
+// trusted-proxy allowlist in this codebase, and honoring client-supplied
+// headers would let an attacker bypass the login/register rate limiter by
+// sending a different value on every request.
 func getRemoteIP(r *http.Request) string {
-	if addr := r.Header.Get("X-Forwarded-For"); addr != "" {
-		parts := strings.Split(addr, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
-		}
-	}
-	if addr := r.Header.Get("X-Real-IP"); addr != "" {
-		return strings.TrimSpace(addr)
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
