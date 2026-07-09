@@ -814,12 +814,21 @@ export default function BoardPage() {
       }
     } catch (err) {
       setSubmitting(false);
-      setBanner({ kind: "error", text: "Backend unreachable — cleared local state." });
-      setDateKeys([]);
-      setWeekData({});
-      setSummary({ reportedHours: 0, reservedHours: 0 });
-      setCommittedHoursByWorkType({});
-      clearCustomWorkTypes();
+      // A response from the server (e.g. 403 ownership violation) means the
+      // request reached the backend and was rejected for a specific reason —
+      // that's not the same as being unreachable, and doesn't call for
+      // wiping the admin's whole working view. Only a status-less error
+      // (network failure) does.
+      if (err?.status != null) {
+        setBanner({ kind: "error", text: err.message || "Request failed." });
+      } else {
+        setBanner({ kind: "error", text: "Backend unreachable — cleared local state." });
+        setDateKeys([]);
+        setWeekData({});
+        setSummary({ reportedHours: 0, reservedHours: 0 });
+        setCommittedHoursByWorkType({});
+        clearCustomWorkTypes();
+      }
       return;
     }
     setBanner({ kind: "success", text: `Updated released capacity to ${adminAdjustTarget.targetHours}h.` });
@@ -884,12 +893,19 @@ export default function BoardPage() {
         setBanner(res.ok ? { kind: "success", text: "Released block removed." } : { kind: "error", text: res.error });
         if (res.ok) loadWeek(anchorDate);
       } catch (err) {
-        setBanner({ kind: "error", text: "Backend unreachable — cleared local state." });
-        setDateKeys([]);
-        setWeekData({});
-        setSummary({ reportedHours: 0, reservedHours: 0 });
-        setCommittedHoursByWorkType({});
-        clearCustomWorkTypes();
+        // See handleAdminAdjustConfirm — a status-carrying error means the
+        // server responded (e.g. 403 ownership violation), which isn't a
+        // reason to wipe the admin's whole working view.
+        if (err?.status != null) {
+          setBanner({ kind: "error", text: err.message || "Request failed." });
+        } else {
+          setBanner({ kind: "error", text: "Backend unreachable — cleared local state." });
+          setDateKeys([]);
+          setWeekData({});
+          setSummary({ reportedHours: 0, reservedHours: 0 });
+          setCommittedHoursByWorkType({});
+          clearCustomWorkTypes();
+        }
         return;
       }
     },
