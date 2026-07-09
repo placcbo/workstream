@@ -15,13 +15,16 @@ import {
   fetchActiveTimer,
   startTimer as apiStartTimer,
   stopTimer as apiStopTimer,
+  fetchNotifications,
+  markNotificationsRead,
 } from "../data/backendApi";
-import { formatDateHeading, formatMonthHeading, MAX_HOURS_PER_DAY, toDateKey } from "../data/schedule";
+import { formatDateHeading, formatMonthHeading, buildMonthDateKeys, MAX_HOURS_PER_DAY, toDateKey } from "../data/schedule";
 import Header from "../components/Header";
 import MiniMonth from "../components/MiniMonth";
 import CalendarLayers from "../components/CalendarLayers";
 import TimeInsights from "../components/TimeInsights";
 import WeekGrid from "../components/WeekGrid";
+import MonthGrid from "../components/MonthGrid";
 import AdminReleasePanel from "../components/AdminReleasePanel";
 import AdminProjectsAndUsers from "../components/AdminProjectsAndUsers";
 import AdminInsights from "../components/AdminInsights";
@@ -61,6 +64,13 @@ export default function BoardPage() {
   const [monthCursor, setMonthCursor] = useState({ year: todayDate.getFullYear(), month: todayDate.getMonth() });
   const [dateKeys, setDateKeys] = useState([]);
   const [weekData, setWeekData] = useState({});
+  // Month view is a fast-navigation overview layered on top of the existing
+  // week machinery, not a replacement for it — kept as separate state since
+  // several places (e.g. TimeInsights) assume dateKeys/weekData are exactly
+  // one week. Only the grid itself swaps between WeekGrid/MonthGrid.
+  const [viewMode, setViewMode] = useState("week");
+  const [monthData, setMonthData] = useState({});
+  const [monthLoading, setMonthLoading] = useState(false);
   const [pendingClaim, setPendingClaim] = useState(null);
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
   const [adminAdjustTarget, setAdminAdjustTarget] = useState(null);
@@ -96,6 +106,9 @@ export default function BoardPage() {
   // "Start timer".
   const [bookingBanked, setBookingBanked] = useState({});
   const [isRefreshingReserved, setIsRefreshingReserved] = useState(false);
+  // Persistent, server-side notifications (e.g. "your timer was auto-
+  // stopped", "an admin moved a shift you claimed") — see NotificationsBell.
+  const [notifications, setNotifications] = useState([]);
 
   // Popup/toast notifications — used for events the user needs to notice
   // even if a modal (e.g. the reserved-blocks overlay) is open on top of
@@ -160,6 +173,36 @@ export default function BoardPage() {
     loadWeek(anchorDate, true);
   }, [anchorDate, loadWeek]);
 
+  // Month view reuses fetchWeekSchedule as-is (it accepts any array of date
+  // keys, not just a 7-day week) — only the set of keys fetched differs.
+  const loadMonth = useCallback(
+    async (year, month) => {
+      setMonthLoading(true);
+      try {
+        const keys = buildMonthDateKeys(year, month);
+        const data = await fetchWeekSchedule(keys, user?.id ?? "", isAdmin, grantedWorkTypes);
+        setMonthData(data);
+      } catch (err) {
+        setMonthData({});
+        setBanner({ kind: "error", text: "Backend unreachable — cleared local state." });
+      } finally {
+        setMonthLoading(false);
+      }
+    },
+    [user?.id, isAdmin, grantedWorkTypes]
+  );
+
+  useEffect(() => {
+    if (viewMode !== "month") return;
+    loadMonth(monthCursor.year, monthCursor.month);
+  }, [viewMode, monthCursor, loadMonth]);
+
+  const handleSelectMonthDay = useCallback((dateKey) => {
+    setAnchorDate(new Date(`${dateKey}T00:00:00`));
+    setActiveDate(dateKey);
+    setViewMode("week");
+  }, []);
+
   const handleAddWorkType = useCallback((name) => {
     addCustomWorkType(name);
     // Auto-select the project for admin quick-access and refresh insights
@@ -199,6 +242,42 @@ export default function BoardPage() {
       cancelled = true;
       clearInterval(interval);
     };
+  }, []);
+
+  // Notifications are server-side (see Notification in main.go) so they
+  // survive a reload and are visible even if the user wasn't looking when
+  // the triggering event happened. Fetch on mount/user-change, then poll —
+  // there's no push/websocket layer in this app, so polling is consistent
+  // with how the rest of the app already refreshes (the liveness probe above).
+  useEffect(() => {
+    if (!user?.id) {
+      setNotifications([]);
+      return undefined;
+    }
+    let cancelled = false;
+    const load = () => {
+      fetchNotifications()
+        .then((list) => {
+          if (!cancelled) setNotifications(Array.isArray(list) ? list : []);
+        })
+        .catch(() => {});
+    };
+    load();
+    const interval = setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.id]);
+
+  const handleMarkNotificationRead = useCallback((id) => {
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+    markNotificationsRead({ id }).catch(() => {});
+  }, []);
+
+  const handleMarkAllNotificationsRead = useCallback(() => {
+    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    markNotificationsRead({ all: true }).catch(() => {});
   }, []);
 
   /** Committed hours for `activeDate`, scoped per project — refetched whenever the visible week data changes. */
@@ -1068,7 +1147,15 @@ export default function BoardPage() {
         </div>
       )}
 
-      <Header user={user} onLogout={logout} onShowReservedBlocks={() => setShowReservedBlocks(true)} timerRunning={timerRunning} />
+      <Header
+        user={user}
+        onLogout={logout}
+        onShowReservedBlocks={() => setShowReservedBlocks(true)}
+        timerRunning={timerRunning}
+        notifications={notifications}
+        onMarkNotificationRead={handleMarkNotificationRead}
+        onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
+      />
 
       <section className="board-summary-bar" aria-label="Week summary">
         <div className="board-summary-item">
@@ -1351,15 +1438,45 @@ export default function BoardPage() {
         <section className="board-week-area">
           <div className="week-nav">
             <div className="week-nav-controls">
-              <button className="week-nav-arrow" onClick={handlePrevWeek} aria-label="Previous week">
+              <button
+                className="week-nav-arrow"
+                onClick={viewMode === "month" ? handlePrevMonth : handlePrevWeek}
+                aria-label={viewMode === "month" ? "Previous month" : "Previous week"}
+              >
                 &lsaquo;
               </button>
-              <button className="week-nav-arrow" onClick={handleNextWeek} aria-label="Next week">
+              <button
+                className="week-nav-arrow"
+                onClick={viewMode === "month" ? handleNextMonth : handleNextWeek}
+                aria-label={viewMode === "month" ? "Next month" : "Next week"}
+              >
                 &rsaquo;
               </button>
-              <span className="week-nav-heading">{weekHeading}</span>
+              <span className="week-nav-heading">
+                {viewMode === "month" ? formatMonthHeading(monthCursor.year, monthCursor.month) : weekHeading}
+              </span>
             </div>
             <div className="week-nav-meta">
+              <div className="view-mode-switch" role="tablist" aria-label="Calendar view">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={viewMode === "week"}
+                  className={`view-mode-button ${viewMode === "week" ? "view-mode-button--active" : ""}`}
+                  onClick={() => setViewMode("week")}
+                >
+                  Week
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={viewMode === "month"}
+                  className={`view-mode-button ${viewMode === "month" ? "view-mode-button--active" : ""}`}
+                  onClick={() => setViewMode("month")}
+                >
+                  Month
+                </button>
+              </div>
               <button className="btn btn--ghost week-nav-today" onClick={handleJumpToToday}>
                 Today
               </button>
@@ -1537,20 +1654,32 @@ export default function BoardPage() {
           )}
 
           <div className="board-week-grid-wrap">
-            <WeekGrid
-              dateKeys={dateKeys}
-              weekData={weekData}
-              pendingClaim={pendingClaim}
-              projectFilter={adminProjectFilter}
-              onSelectBlock={handleSelectBlock}
-              onCancelBooking={handleCancelBooking}
-              visibleLayers={visibleLayers}
-              todayKey={todayKey}
-              isAdmin={isAdmin}
-              onRevokeBlock={handleRevokeBlock}
-              disabled={submitting}
-              loading={loading && Object.keys(weekData).length === 0}
-            />
+            {viewMode === "month" ? (
+              <MonthGrid
+                year={monthCursor.year}
+                month={monthCursor.month}
+                monthData={monthData}
+                isAdmin={isAdmin}
+                todayKey={todayKey}
+                onSelectDay={handleSelectMonthDay}
+                loading={monthLoading && Object.keys(monthData).length === 0}
+              />
+            ) : (
+              <WeekGrid
+                dateKeys={dateKeys}
+                weekData={weekData}
+                pendingClaim={pendingClaim}
+                projectFilter={adminProjectFilter}
+                onSelectBlock={handleSelectBlock}
+                onCancelBooking={handleCancelBooking}
+                visibleLayers={visibleLayers}
+                todayKey={todayKey}
+                isAdmin={isAdmin}
+                onRevokeBlock={handleRevokeBlock}
+                disabled={submitting}
+                loading={loading && Object.keys(weekData).length === 0}
+              />
+            )}
           </div>
         </section>
 

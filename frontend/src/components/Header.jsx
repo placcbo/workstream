@@ -1,6 +1,7 @@
 import ThemeToggle from "./ThemeToggle";
+import NotificationsBell from "./NotificationsBell";
 
-export default function Header({ user, onLogout, onShowReservedBlocks, timerRunning }) {
+export default function Header({ user, onLogout, onShowReservedBlocks, timerRunning, notifications, onMarkNotificationRead, onMarkAllNotificationsRead }) {
   // Bug fix: admin-2 (and any future account) may have no avatarUrl.
   // Render a text-initial avatar as a safe fallback instead of a broken <img>.
   const initials = user.name
@@ -28,6 +29,11 @@ export default function Header({ user, onLogout, onShowReservedBlocks, timerRunn
         </button>
         <span>WorkBoard</span>
         <ThemeToggle />
+        <NotificationsBell
+          notifications={notifications}
+          onMarkRead={onMarkNotificationRead}
+          onMarkAllRead={onMarkAllNotificationsRead}
+        />
         {user.role === "admin" && <span className="role-badge">ADMIN</span>}
       </div>
       <div className="app-identity">

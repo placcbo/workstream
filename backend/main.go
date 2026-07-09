@@ -85,19 +85,34 @@ type Timer struct {
 	DateKey   string `json:"dateKey,omitempty"`
 }
 
+// Notification is a persistent, per-user in-app notice — e.g. "your timer
+// was auto-stopped" or "an admin moved a shift you already claimed". Kept
+// server-side (rather than a client-only toast) so it survives a page
+// reload and is visible even if the user wasn't looking when it happened.
+type Notification struct {
+	ID        string `json:"id"`
+	UserID    string `json:"-"`
+	Kind      string `json:"kind"`
+	Message   string `json:"message"`
+	CreatedAt int64  `json:"createdAt"`
+	Read      bool   `json:"read"`
+}
+
 type Store struct {
 	mu               sync.Mutex
 	releaseBlocks    map[string][]Block
 	bookings         []Booking
-	projects         map[string][]string // Projects per admin: { adminId: [projectNames...] }
-	workTypeAccess   map[string][]string // { workType: [normalized emails...] } — extra grants beyond defaultWorkTypes
-	users            map[string]User     // keyed by normalized email
-	timers           map[string]*Timer   // keyed by userID — the user's currently-running timer, if any
-	reportedOverride map[string]float64  // keyed by userID — hours banked from stopped timers, on top of completed-booking hours
-	bookingBanked    map[string]float64  // keyed by bookingID — hours already banked into reportedOverride for that specific booking, so completed-shift hours aren't double-counted
+	projects         map[string][]string        // Projects per admin: { adminId: [projectNames...] }
+	workTypeAccess   map[string][]string         // { workType: [normalized emails...] } — extra grants beyond defaultWorkTypes
+	users            map[string]User             // keyed by normalized email
+	timers           map[string]*Timer           // keyed by userID — the user's currently-running timer, if any
+	reportedOverride map[string]float64          // keyed by userID — hours banked from stopped timers, on top of completed-booking hours
+	bookingBanked    map[string]float64          // keyed by bookingID — hours already banked into reportedOverride for that specific booking, so completed-shift hours aren't double-counted
+	notifications    map[string][]Notification   // keyed by userID, newest first, capped per user — see addNotification
 	nextBlockID      int
 	nextBookingID    int
 	nextUserID       int
+	nextNotifID      int
 }
 
 var store = &Store{
@@ -109,9 +124,32 @@ var store = &Store{
 	timers:           make(map[string]*Timer),
 	reportedOverride: make(map[string]float64),
 	bookingBanked:    make(map[string]float64),
+	notifications:    make(map[string][]Notification),
 	nextBlockID:      100,
 	nextBookingID:    100,
 	nextUserID:       1,
+	nextNotifID:      1,
+}
+
+// maxNotificationsPerUser bounds memory in this in-memory store — older
+// notifications are dropped once a user exceeds this count.
+const maxNotificationsPerUser = 50
+
+// addNotification records a new notification for userID, newest first.
+// Callers must hold store.mu.
+func addNotification(userID, kind, message string) {
+	list := append([]Notification{{
+		ID:        fmt.Sprintf("n-%d", store.nextNotifID),
+		UserID:    userID,
+		Kind:      kind,
+		Message:   message,
+		CreatedAt: time.Now().UnixMilli(),
+	}}, store.notifications[userID]...)
+	store.nextNotifID++
+	if len(list) > maxNotificationsPerUser {
+		list = list[:maxNotificationsPerUser]
+	}
+	store.notifications[userID] = list
 }
 
 // MaxPlausibleTimerHours mirrors the client-side cap: if a timer has been
@@ -907,6 +945,7 @@ func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't change the project — %dh are already claimed on this block under %q.", reserved, block.WorkType)})
 			return
 		}
+		originalStartTime, originalEndTime := block.StartTime, block.EndTime
 		current[i].TotalHours = normalizedTotal
 		current[i].BlockSize = normalizedTotal
 		if payload.ShiftName != "" {
@@ -920,6 +959,26 @@ func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
 		}
 		if payload.WorkType != "" {
 			current[i].WorkType = payload.WorkType
+		}
+		// A worker who already claimed hours on this block has no other way
+		// to learn their shift window moved — everything else this handler
+		// can change is already guarded against affecting an existing claim
+		// (total can't drop below reserved, workType can't change once
+		// claimed), so a start/end time change is the one case that
+		// legitimately needs to reach them.
+		timeChanged := (current[i].StartTime != originalStartTime) || (current[i].EndTime != originalEndTime)
+		if timeChanged && reserved > 0 {
+			notified := map[string]bool{}
+			for _, b := range getBlockBookings(current[i].ID) {
+				if notified[b.UserID] {
+					continue
+				}
+				notified[b.UserID] = true
+				addNotification(b.UserID, "shift_time_changed", fmt.Sprintf(
+					"Your %s shift on %s was moved to %s–%s.",
+					current[i].WorkType, payload.DateKey, current[i].StartTime, current[i].EndTime,
+				))
+			}
 		}
 		if payload.MaxHoursPerUser > 0 {
 			// Ensure lowering the per-user cap doesn't invalidate existing
@@ -1447,6 +1506,56 @@ func handleRevokeWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// Notifications — persistent, per-user in-app notices (see the Notification
+// type above for why these are server-side rather than client-only toasts).
+// ---------------------------------------------------------------------------
+
+// GET /api/notifications — the caller's own notifications, newest first.
+func handleGetNotifications(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	list := store.notifications[account.ID]
+	if list == nil {
+		list = []Notification{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// POST /api/notifications/mark-read { id } or { all: true } — scoped to the
+// caller's own notifications; a client-supplied userID is never trusted,
+// matching every other handler in this file.
+func handleMarkNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
+	var payload struct {
+		ID  string `json:"id"`
+		All bool   `json:"all"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	list := store.notifications[account.ID]
+	for i := range list {
+		if payload.All || list[i].ID == payload.ID {
+			list[i].Read = true
+		}
+	}
+	if list == nil {
+		list = []Notification{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// ---------------------------------------------------------------------------
 // Work timer — one active stopwatch per user, held server-side so refreshing
 // the page or opening a second browser/tab reflects the same running timer
 // instead of relying on localStorage.
@@ -1483,6 +1592,10 @@ func handleGetTimer(w http.ResponseWriter, r *http.Request) {
 			store.bookingBanked[timer.BookingID] += addedHours
 		}
 		delete(store.timers, userID)
+		addNotification(userID, "timer_auto_stopped", fmt.Sprintf(
+			"Your timer for %q was stopped automatically after running %dh unattended — %gh was reported.",
+			timer.TaskName, maxPlausibleTimerHours, addedHours,
+		))
 		writeJSON(w, http.StatusOK, map[string]any{
 			"timer":          nil,
 			"bankedHours":    store.reportedOverride[userID],
@@ -1913,6 +2026,8 @@ func main() {
 	http.HandleFunc("/api/work-type-access", withCORS(handleGetWorkTypeAccess))
 	http.HandleFunc("/api/work-type-access/grant", withCORS(handleGrantWorkTypeAccess))
 	http.HandleFunc("/api/work-type-access/revoke", withCORS(handleRevokeWorkTypeAccess))
+	http.HandleFunc("/api/notifications", withCORS(handleGetNotifications))
+	http.HandleFunc("/api/notifications/mark-read", withCORS(handleMarkNotificationsRead))
 	http.HandleFunc("/api/timer", withCORS(handleTimerRouter))
 	http.HandleFunc("/api/timer/start", withCORS(handleStartTimer))
 	http.HandleFunc("/api/timer/stop", withCORS(handleStopTimer))

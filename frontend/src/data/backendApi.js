@@ -199,6 +199,15 @@ export function revokeWorkTypeAccess(email, workType) {
   return callApi(`/work-type-access/revoke`, { email, workType });
 }
 
+// ── Notifications ───────────────────────────────────────────────────────
+export function fetchNotifications() {
+  return getApi(`/notifications`);
+}
+
+export function markNotificationsRead(payload) {
+  return callApi(`/notifications/mark-read`, payload);
+}
+
 // ── Work timer (replaces localStorage "timerState_*" / "reportedHoursOverride_*") ──
 export function fetchActiveTimer(userId) {
   return getApi(`/timer?userId=${encodeURIComponent(userId)}`);

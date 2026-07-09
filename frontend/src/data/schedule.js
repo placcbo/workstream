@@ -154,6 +154,15 @@ export function formatMonthHeading(year, month) {
   return new Date(year, month, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
+/** The date keys that actually belong to `month` (unlike buildMonthGrid's
+ * padded 42-cell grid, which pads with adjacent-month days so every
+ * calendar row is full) — this is what to fetch schedule data for. */
+export function buildMonthDateKeys(year, month) {
+  return buildMonthGrid(year, month)
+    .filter((cell) => cell.inMonth)
+    .map((cell) => cell.dateKey);
+}
+
 // ---------------------------------------------------------------------------
 // Block layout
 //
