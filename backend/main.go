@@ -1055,8 +1055,11 @@ func handleReserveHours(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Only %dh remain in this block.", remainingHours)})
 		return
 	}
-	// enforce per-project daily max: prefer block.MaxHoursPerUser if set, otherwise use payload.MaxHoursPerDay
-	perUserMax := payload.MaxHoursPerDay
+	// enforce per-project daily max: prefer block.MaxHoursPerUser if set,
+	// otherwise fall back to the server-side default. payload.MaxHoursPerDay
+	// is client-supplied and must never be trusted as the cap itself, or a
+	// caller could self-report an inflated limit.
+	perUserMax := maxHoursPerDay
 	if block.MaxHoursPerUser > 0 {
 		perUserMax = block.MaxHoursPerUser
 	}
@@ -1162,8 +1165,10 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	otherUserHours := userHoursForDayAndWorkType(target.DateKey, payload.UserID, block.WorkType, payload.BookingID)
-	// respect block-level per-user max if present
-	perUserMax := payload.MaxHoursPerDay
+	// respect block-level per-user max if present, otherwise fall back to
+	// the server-side default — payload.MaxHoursPerDay is client-supplied
+	// and must never be trusted as the cap itself.
+	perUserMax := maxHoursPerDay
 	if block.MaxHoursPerUser > 0 {
 		perUserMax = block.MaxHoursPerUser
 	}
