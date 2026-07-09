@@ -123,12 +123,6 @@ export default function AdminReleasePanel({
     }
   }, [highlightedProject, customWorkTypes.join(",")]);
 
-  useEffect(() => {
-    const defaults = getDefaultTimesForDate(selectedDate);
-    setStartTime(defaults.startTime);
-    setEndTime(defaults.endTime);
-  }, [selectedDate]);
-
   const effectiveWorkType   = workType;
   const projectBlocks       = dateBlocks.filter((b) => b.workType === effectiveWorkType);
   const projectReleased     = projectBlocks.reduce((s, b) => s + b.totalHours, 0);
