@@ -541,9 +541,17 @@ export default function BoardPage() {
   // timer card itself, filling the space that used to sit empty below the
   // clock once the old footer moved up into the header.
   const activeTrackedBlock = useMemo(() => {
-    if (!timerRunning || timerBookingId == null) return null;
-    return reservedBlocks.find((block) => block.bookings?.some((booking) => booking.isMine && booking.id === timerBookingId)) ?? null;
-  }, [reservedBlocks, timerRunning, timerBookingId]);
+    if (!timerRunning || timerBookingId == null || !timerDateKey) return null;
+    // Look this up by timerDateKey, not activeDate/reservedBlocks — the
+    // timer keeps running after the user navigates to a different day or
+    // week, and reservedBlocks is scoped to whatever day is currently being
+    // viewed. Using activeDate here silently dropped the auto-stop safety
+    // net once the two diverged.
+    const block = (weekData[timerDateKey]?.blocks ?? []).find((b) =>
+      b.bookings?.some((booking) => booking.isMine && booking.id === timerBookingId)
+    );
+    return block ? { ...block, dateKey: timerDateKey } : null;
+  }, [weekData, timerRunning, timerBookingId, timerDateKey]);
 
   const activeTrackedProgressPct = useMemo(() => {
     if (!activeTrackedBlock || activeTrackedBlock.myHours <= 0) return 0;
