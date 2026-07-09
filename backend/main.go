@@ -1315,8 +1315,16 @@ func handleProjectsRouter(w http.ResponseWriter, r *http.Request) {
 // Mirrors AuthContext.jsx's workTypeAccess: { workType: [emails...] }.
 // ---------------------------------------------------------------------------
 
-// GET /api/work-type-access returns the full grant map.
+// GET /api/work-type-access returns the full grant map. Every account (not
+// just admins) needs this: non-admin users read it client-side to compute
+// their own granted work types (see BoardPage.jsx's grantedWorkTypes), so
+// this only requires a valid session, not admin — the bug being fixed is
+// "no auth at all", not "should be admin-only".
 func handleGetWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
+	_, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	out := make(map[string][]string, len(store.workTypeAccess))
