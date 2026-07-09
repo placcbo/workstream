@@ -79,8 +79,19 @@ export default function WeekGrid({
     )
   );
 
+  // Workers can't tell an empty week (nothing released yet) from a load
+  // failure — the grid alone looks identical either way. Admins already get
+  // this context from the "Release capacity" panel and "Week at a glance",
+  // so this is worker-only.
+  const hasAnyBlocks = !isAdmin && dateKeys.some((dateKey) => (weekData[dateKey]?.blocks?.length ?? 0) > 0);
+  const showEmptyNote = !isAdmin && !hasAnyBlocks;
+
   return (
-    <div className="week-grid week-grid--released" style={{ "--ledger-rows": maxRows }}>
+    <>
+      {showEmptyNote && (
+        <p className="week-grid-empty-note">No shifts have been released for this week yet — check back soon.</p>
+      )}
+      <div className="week-grid week-grid--released" style={{ "--ledger-rows": maxRows }}>
       <div className="week-grid-corner" />
       <div className="week-grid-day-headers">
         {dateKeys.map((dateKey) => (
@@ -288,5 +299,6 @@ export default function WeekGrid({
         })}
       </div>
     </div>
+    </>
   );
 }

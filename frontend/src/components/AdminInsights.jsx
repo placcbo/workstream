@@ -222,7 +222,7 @@ export default function AdminInsights({ dateKeys, weekData, customWorkTypes = []
       <div className="ai-header">
         <span className="ai-eyebrow">Admin</span>
         <h2 className="ai-title">Week at a glance</h2>
-        <p className="ai-sub">Capacity + uptake for the current week view</p>
+        <p className="ai-sub">Team-wide capacity + uptake for the current week view</p>
       </div>
 
       {/* ── KPI strip ─────────────────────────────────────────────────── */}

@@ -110,6 +110,13 @@ body {
 @media (max-width: 980px) {
   .board-main--week {
     flex-direction: column;
+    /* align-items: flex-start (set above for the desktop row layout,
+       to top-align the sidebar and week area) means "don't stretch" on
+       the cross axis. Once flex-direction flips to column here, the
+       cross axis becomes horizontal, so flex-start let children size to
+       their own intrinsic content width instead of the viewport width —
+       overflowing the page horizontally on mobile. Stretch instead. */
+    align-items: stretch;
   }
 }
 
@@ -655,9 +662,28 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
   padding: 18px 28px;
   border-bottom: 1px solid var(--line);
   background: var(--ink);
+}
+
+@media (max-width: 480px) {
+  .app-header {
+    padding: 14px 16px;
+  }
+
+  .app-identity-text {
+    max-width: 140px;
+  }
+
+  .app-identity-name,
+  .app-identity-email {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .app-brand {
@@ -747,6 +773,14 @@ body {
 .btn--disabled {
   opacity: 0.35;
   cursor: not-allowed;
+}
+
+/* .btn had no focus style of its own, so keyboard focus fell back to the
+   browser default outline — usually a stock blue ring that clashes with
+   the dark theme. Match the amber ring already used for calendar blocks. */
+.btn:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
 }
 
 .btn--disabled:hover {
@@ -2018,11 +2052,30 @@ body {
   gap: 14px;
 }
 
+/* Flex items default to min-width: auto (their own min-content size),
+   which overrides min-width: 0 on the container above and can still
+   force it wider than the viewport on mobile — e.g. the release-capacity
+   form's multi-column grid. Let every direct child shrink freely; each
+   one's own content (grids, etc.) is responsible for wrapping/scrolling
+   within that width. */
+.board-week-area > * {
+  min-width: 0;
+}
+
 .board-week-grid-wrap {
   background: var(--ink-raised);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   overflow: hidden;
+}
+
+.week-grid-empty-note {
+  padding: 10px 16px;
+  font-size: 0.82rem;
+  color: var(--paper-dim);
+  text-align: center;
+  border-bottom: 1px solid var(--line);
+  background: var(--ink-raised);
 }
 
 .ledger-loading {
@@ -2282,47 +2335,6 @@ body {
 }
 
 .week-grid-block-cancel:hover {
-  opacity: 1;
-}
-
-.week-block-grid {
-  max-height: 640px;
-  overflow: auto;
-}
-
-.week-block-grid-days {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(132px, 1fr));
-  min-width: 920px;
-}
-
-.week-block-day {
-  min-height: 560px;
-  border-left: 1px solid var(--line);
-  background: transparent;
-}
-
-.week-block-day:first-child {
-  border-left: none;
-}
-
-.week-block-day-header {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  padding: 10px 4px;
-  border-bottom: 1px solid var(--line);
-  background: var(--ink-raised);
-}
-
-.week-block-day.is-today .week-grid-weekday,
-.week-block-day.is-today .week-grid-daynum {
-  color: var(--signal);
   opacity: 1;
 }
 

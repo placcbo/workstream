@@ -1077,12 +1077,12 @@ export default function BoardPage() {
           <span className="board-summary-note">{rangeLabel}</span>
         </div>
         <div className="board-summary-item">
-          <span className="board-summary-label">Reported</span>
+          <span className="board-summary-label">Your reported</span>
           <strong>{effectiveReportedHours.toFixed(1)}h</strong>
           <span className="board-summary-note">Incl. banked time</span>
         </div>
         <div className="board-summary-item">
-          <span className="board-summary-label">Reserved</span>
+          <span className="board-summary-label">Your reserved</span>
           <strong>{summary.reservedHours.toFixed(1)}h</strong>
           <span className="board-summary-note">Current week</span>
         </div>
