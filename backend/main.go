@@ -520,10 +520,18 @@ func handleWeekSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUserHours(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
 	query := r.URL.Query()
 	dateKey := query.Get("dateKey")
 	userID := query.Get("userId")
 	workType := query.Get("workType")
+	if account.Role != "admin" && userID != account.ID {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+		return
+	}
 	result := 0
 	store.mu.Lock()
 	result = userHoursForDayAndWorkType(dateKey, userID, workType, "")
@@ -532,12 +540,20 @@ func handleUserHours(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUserHoursSummary(w http.ResponseWriter, r *http.Request) {
+	account, ok := requireSessionAccount(w, r)
+	if !ok {
+		return
+	}
 	var payload struct {
 		DateKeys []string `json:"dateKeys"`
 		UserID   string   `json:"userId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if account.Role != "admin" && payload.UserID != account.ID {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
 		return
 	}
 	dateSet := make(map[string]struct{}, len(payload.DateKeys))
