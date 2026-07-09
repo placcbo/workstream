@@ -271,7 +271,7 @@ export default function WeekGrid({
               })}
 
               {isAdmin &&
-                dayInfo.blocks.map((block) =>
+                filteredBlocks.map((block) =>
                   block.reservedHours === 0 ? (
                     <button
                       key={`remove-${block.id}`}
