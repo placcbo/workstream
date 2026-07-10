@@ -2,30 +2,59 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http/httptest"
-	"sync"
+	"os"
 	"testing"
+
+	"github.com/joho/godotenv"
 )
 
-func TestRegisterAndLoginFlow(t *testing.T) {
-	store = &Store{
-		releaseBlocks:    make(map[string][]Block),
-		projects:         make(map[string][]string),
-		workTypeAccess:   make(map[string][]string),
-		users:            make(map[string]User),
-		timers:           make(map[string]*Timer),
-		reportedOverride: make(map[string]float64),
-		bookingBanked:    make(map[string]float64),
-		nextBlockID:      100,
-		nextBookingID:    100,
-		nextUserID:       1,
+func TestMain(m *testing.M) {
+	_ = godotenv.Load()
+	db = connectDB(context.Background())
+	defer db.Close()
+	os.Exit(m.Run())
+}
+
+// truncateAll resets every table between tests, including sequences, so
+// tests are deterministic and independent of run order — the direct
+// Postgres equivalent of reassigning a fresh in-memory Store, which this
+// used to do before persistence moved to Postgres.
+//
+// RESTART IDENTITY only resets sequences owned by a column (SERIAL /
+// GENERATED ... AS IDENTITY) — projects/work_type_access use BIGSERIAL so
+// that part's covered, but user_id_seq/release_block_id_seq/booking_id_seq/
+// notification_id_seq are standalone sequences referenced from a DEFAULT
+// expression, so TRUNCATE never touches them. Reset those explicitly.
+func truncateAll(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := db.Exec(ctx, `
+		TRUNCATE TABLE
+			notifications, booking_banked, reported_override, timers,
+			bookings, release_blocks, work_type_access, projects,
+			sessions, users
+		RESTART IDENTITY CASCADE
+	`)
+	if err != nil {
+		t.Fatalf("failed to truncate tables: %v", err)
 	}
-	activeSessions = struct {
-		mu sync.Mutex
-		m  map[string]sessionAccount
-	}{m: make(map[string]sessionAccount)}
+	_, err = db.Exec(ctx, `
+		ALTER SEQUENCE user_id_seq RESTART WITH 1;
+		ALTER SEQUENCE release_block_id_seq RESTART WITH 100;
+		ALTER SEQUENCE booking_id_seq RESTART WITH 100;
+		ALTER SEQUENCE notification_id_seq RESTART WITH 1;
+	`)
+	if err != nil {
+		t.Fatalf("failed to reset sequences: %v", err)
+	}
+}
+
+func TestRegisterAndLoginFlow(t *testing.T) {
+	truncateAll(t)
 
 	defaultAdminInviteCode = "test-admin-invite"
 	registerReq := map[string]any{
@@ -66,18 +95,7 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 }
 
 func TestRegisterRejectsShortPassword(t *testing.T) {
-	store = &Store{
-		releaseBlocks:    make(map[string][]Block),
-		projects:         make(map[string][]string),
-		workTypeAccess:   make(map[string][]string),
-		users:            make(map[string]User),
-		timers:           make(map[string]*Timer),
-		reportedOverride: make(map[string]float64),
-		bookingBanked:    make(map[string]float64),
-		nextBlockID:      100,
-		nextBookingID:    100,
-		nextUserID:       1,
-	}
+	truncateAll(t)
 
 	registerReq := map[string]any{
 		"name":       "Short Password",
@@ -98,22 +116,7 @@ func TestRegisterRejectsShortPassword(t *testing.T) {
 }
 
 func TestSessionLoginRejectsClientSuppliedAccount(t *testing.T) {
-	store = &Store{
-		releaseBlocks:    make(map[string][]Block),
-		projects:         make(map[string][]string),
-		workTypeAccess:   make(map[string][]string),
-		users:            make(map[string]User),
-		timers:           make(map[string]*Timer),
-		reportedOverride: make(map[string]float64),
-		bookingBanked:    make(map[string]float64),
-		nextBlockID:      100,
-		nextBookingID:    100,
-		nextUserID:       1,
-	}
-	activeSessions = struct {
-		mu sync.Mutex
-		m  map[string]sessionAccount
-	}{m: make(map[string]sessionAccount)}
+	truncateAll(t)
 
 	defaultAdminInviteCode = "test-admin-invite"
 	registerReq := map[string]any{

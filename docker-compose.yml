@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: workstream
+      POSTGRES_PASSWORD: workstream
+      POSTGRES_DB: workstream
+    ports:
+      - "5433:5432"
+    volumes:
+      - workstream_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workstream -d workstream"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  workstream_pgdata:

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -13,9 +16,51 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 )
+
+//go:embed schema.sql
+var schemaSQL string
+
+// dbtx is satisfied by both *pgxpool.Pool and pgx.Tx, so every query helper
+// below can run either directly against the pool (simple reads/writes) or
+// inside an explicit transaction (check-then-write critical sections that
+// need SELECT...FOR UPDATE — the Postgres analog of the mutex-guarded
+// critical sections this file used to have around the in-memory store).
+type dbtx interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+var db *pgxpool.Pool
+
+func connectDB(ctx context.Context) *pgxpool.Pool {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		log.Fatalf("failed to create Postgres pool: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatalf("failed to reach Postgres at %s: %v", dsn, err)
+	}
+	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+		log.Fatalf("failed to apply schema: %v", err)
+	}
+	return pool
+}
+
+func writeInternalError(w http.ResponseWriter, err error) {
+	log.Printf("internal error: %v", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+}
 
 type Block struct {
 	ID              string `json:"id"`
@@ -98,58 +143,25 @@ type Notification struct {
 	Read      bool   `json:"read"`
 }
 
-type Store struct {
-	mu               sync.Mutex
-	releaseBlocks    map[string][]Block
-	bookings         []Booking
-	projects         map[string][]string        // Projects per admin: { adminId: [projectNames...] }
-	workTypeAccess   map[string][]string         // { workType: [normalized emails...] } — extra grants beyond defaultWorkTypes
-	users            map[string]User             // keyed by normalized email
-	timers           map[string]*Timer           // keyed by userID — the user's currently-running timer, if any
-	reportedOverride map[string]float64          // keyed by userID — hours banked from stopped timers, on top of completed-booking hours
-	bookingBanked    map[string]float64          // keyed by bookingID — hours already banked into reportedOverride for that specific booking, so completed-shift hours aren't double-counted
-	notifications    map[string][]Notification   // keyed by userID, newest first, capped per user — see addNotification
-	nextBlockID      int
-	nextBookingID    int
-	nextUserID       int
-	nextNotifID      int
-}
-
-var store = &Store{
-	releaseBlocks:    make(map[string][]Block),
-	bookings:         make([]Booking, 0),
-	projects:         make(map[string][]string),
-	workTypeAccess:   make(map[string][]string),
-	users:            make(map[string]User),
-	timers:           make(map[string]*Timer),
-	reportedOverride: make(map[string]float64),
-	bookingBanked:    make(map[string]float64),
-	notifications:    make(map[string][]Notification),
-	nextBlockID:      100,
-	nextBookingID:    100,
-	nextUserID:       1,
-	nextNotifID:      1,
-}
-
-// maxNotificationsPerUser bounds memory in this in-memory store — older
-// notifications are dropped once a user exceeds this count.
+// maxNotificationsPerUser bounds table growth — older notifications are
+// dropped once a user exceeds this count.
 const maxNotificationsPerUser = 50
 
-// addNotification records a new notification for userID, newest first.
-// Callers must hold store.mu.
-func addNotification(userID, kind, message string) {
-	list := append([]Notification{{
-		ID:        fmt.Sprintf("n-%d", store.nextNotifID),
-		UserID:    userID,
-		Kind:      kind,
-		Message:   message,
-		CreatedAt: time.Now().UnixMilli(),
-	}}, store.notifications[userID]...)
-	store.nextNotifID++
-	if len(list) > maxNotificationsPerUser {
-		list = list[:maxNotificationsPerUser]
+// addNotification records a new notification for userID, newest first, and
+// enforces maxNotificationsPerUser by trimming anything older off the end.
+func addNotification(ctx context.Context, q dbtx, userID, kind, message string) error {
+	if _, err := q.Exec(ctx,
+		`INSERT INTO notifications (user_id, kind, message, created_at) VALUES ($1, $2, $3, $4)`,
+		userID, kind, message, time.Now().UnixMilli(),
+	); err != nil {
+		return err
 	}
-	store.notifications[userID] = list
+	_, err := q.Exec(ctx, `
+		DELETE FROM notifications
+		WHERE user_id = $1 AND id NOT IN (
+			SELECT id FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2
+		)`, userID, maxNotificationsPerUser)
+	return err
 }
 
 // MaxPlausibleTimerHours mirrors the client-side cap: if a timer has been
@@ -246,25 +258,6 @@ func parseDateKey(value string) (time.Time, error) {
 	return time.Parse("2006-01-02", value)
 }
 
-func slotEndDateTime(dateKey string, slotIndex int) time.Time {
-	base, err := parseDateKey(dateKey)
-	if err != nil {
-		return time.Time{}
-	}
-	endHourAbsolute := dayStartHour + slotIndex + 1
-	dayOffset := endHourAbsolute / 24
-	hourOfDay := endHourAbsolute % 24
-	return time.Date(base.Year(), base.Month(), base.Day()+dayOffset, hourOfDay, 0, 0, 0, time.Local)
-}
-
-func deriveBookingStatus(dateKey string, slotIndex int) string {
-	now := time.Now()
-	if slotEndDateTime(dateKey, slotIndex).Before(now) || slotEndDateTime(dateKey, slotIndex).Equal(now) {
-		return "completed"
-	}
-	return "reserved"
-}
-
 // parseTimeOfDay parses an "HH:MM" string into hour/minute, defaulting to
 // 8:00 (the work-day start) if the value is missing or malformed.
 func parseTimeOfDay(value string) (int, int) {
@@ -282,11 +275,11 @@ func parseTimeOfDay(value string) (int, int) {
 
 // shiftEndDateTime is the real calendar Date+time a shift window
 // (startTime -> endTime, e.g. "08:00" -> "17:00") ends at on `dateKey`.
-// Unlike slotEndDateTime, this does NOT depend on a block's TotalHours at
-// all — TotalHours is pooled capacity (can be 50, 200, anything) and is
-// completely decoupled from how long the actual shift window is. If
-// endTime is <= startTime the shift is treated as rolling past midnight
-// into the next calendar day.
+// Unlike a slot-based calculation, this does NOT depend on a block's
+// TotalHours at all — TotalHours is pooled capacity (can be 50, 200,
+// anything) and is completely decoupled from how long the actual shift
+// window is. If endTime is <= startTime the shift is treated as rolling
+// past midnight into the next calendar day.
 func shiftEndDateTime(dateKey, startTime, endTime string) time.Time {
 	base, err := parseDateKey(dateKey)
 	if err != nil {
@@ -358,26 +351,36 @@ func buildBlocks(totalHours int, blockSize int, startSlot int) []Block {
 	return blocks
 }
 
-func getBlockBookings(blockID string) []Booking {
+// getBlockBookings returns every booking for a block.
+func getBlockBookings(ctx context.Context, q dbtx, blockID string) ([]Booking, error) {
+	rows, err := q.Query(ctx, `SELECT id, user_id, date_key, block_id, hours FROM bookings WHERE block_id = $1`, blockID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	bookings := make([]Booking, 0)
-	for _, booking := range store.bookings {
-		if booking.BlockID == blockID {
-			bookings = append(bookings, booking)
+	for rows.Next() {
+		var b Booking
+		if err := rows.Scan(&b.ID, &b.UserID, &b.DateKey, &b.BlockID, &b.Hours); err != nil {
+			return nil, err
 		}
+		bookings = append(bookings, b)
 	}
-	return bookings
+	return bookings, rows.Err()
 }
 
-func reservedForBlock(blockID string) int {
-	sum := 0
-	for _, booking := range getBlockBookings(blockID) {
-		sum += booking.Hours
-	}
-	return sum
+func reservedForBlock(ctx context.Context, q dbtx, blockID string) (int, error) {
+	var sum int
+	err := q.QueryRow(ctx, `SELECT COALESCE(SUM(hours), 0) FROM bookings WHERE block_id = $1`, blockID).Scan(&sum)
+	return sum, err
 }
 
-func remainingForBlock(block Block) int {
-	return int(math.Max(0, float64(block.TotalHours-reservedForBlock(block.ID))))
+func remainingForBlock(ctx context.Context, q dbtx, block Block) (int, error) {
+	reserved, err := reservedForBlock(ctx, q, block.ID)
+	if err != nil {
+		return 0, err
+	}
+	return int(math.Max(0, float64(block.TotalHours-reserved))), nil
 }
 
 // normalizeEmail mirrors AuthContext.jsx's normalizeEmail: trim + lowercase
@@ -398,43 +401,88 @@ func passwordMatches(hash, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
-func blockWorkType(dateKey, blockID string) string {
-	for _, block := range store.releaseBlocks[dateKey] {
-		if block.ID == blockID {
-			return block.WorkType
-		}
-	}
-	return ""
+// userHoursForDayAndWorkType sums hours booked by userID on dateKey against
+// blocks of the given workType, optionally excluding one booking (used when
+// editing a booking, to compute "everything else I have that day").
+func userHoursForDayAndWorkType(ctx context.Context, q dbtx, dateKey, userID, workType, excludeBookingID string) (int, error) {
+	var sum int
+	err := q.QueryRow(ctx, `
+		SELECT COALESCE(SUM(b.hours), 0)
+		FROM bookings b
+		JOIN release_blocks rb ON rb.id = b.block_id
+		WHERE b.date_key = $1 AND b.user_id = $2 AND rb.work_type = $3 AND b.id != $4
+	`, dateKey, userID, workType, excludeBookingID).Scan(&sum)
+	return sum, err
 }
 
-func userHoursForDayAndWorkType(dateKey, userID, workType, excludeBookingID string) int {
-	sum := 0
-	for _, booking := range store.bookings {
-		if booking.DateKey != dateKey || booking.UserID != userID || booking.ID == excludeBookingID {
-			continue
-		}
-		if blockWorkType(dateKey, booking.BlockID) == workType {
-			sum += booking.Hours
-		}
+func bookingBankedForUser(ctx context.Context, q dbtx, userID string) (map[string]float64, error) {
+	rows, err := q.Query(ctx, `
+		SELECT bb.booking_id, bb.hours
+		FROM booking_banked bb
+		JOIN bookings b ON b.id = bb.booking_id
+		WHERE b.user_id = $1 AND bb.hours > 0
+	`, userID)
+	if err != nil {
+		return nil, err
 	}
-	return sum
-}
-
-func bookingBankedForUser(userID string) map[string]float64 {
+	defer rows.Close()
 	result := make(map[string]float64)
-	for _, booking := range store.bookings {
-		if booking.UserID != userID {
-			continue
+	for rows.Next() {
+		var id string
+		var hours float64
+		if err := rows.Scan(&id, &hours); err != nil {
+			return nil, err
 		}
-		if amount, ok := store.bookingBanked[booking.ID]; ok && amount > 0 {
-			result[booking.ID] = amount
-		}
+		result[id] = hours
 	}
-	return result
+	return result, rows.Err()
 }
 
-func serializeBlock(block Block, currentUserID string) BlockResponse {
-	blockBookings := getBlockBookings(block.ID)
+func getReportedOverride(ctx context.Context, q dbtx, userID string) (float64, error) {
+	var hours float64
+	err := q.QueryRow(ctx, `SELECT hours FROM reported_override WHERE user_id = $1`, userID).Scan(&hours)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	return hours, err
+}
+
+// bankTimerSeconds banks `cappedSeconds` worth of elapsed work for `timer`
+// into reported_override (and booking_banked, if the timer was tied to a
+// specific booking), deletes the timer row, and returns the hours added.
+// Callers that need this atomic with other writes must pass a transaction.
+func bankTimerSeconds(ctx context.Context, q dbtx, userID string, timer *Timer, cappedSeconds float64) (float64, error) {
+	addedHours := math.Round((cappedSeconds/3600)*100) / 100
+	// Bank elapsed hours immediately, even for booking-tied timers — partial
+	// work should show up in reported hours right away rather than waiting
+	// for the whole shift to complete. See handleUserHoursSummary for how
+	// double-counting against the eventual completed-booking hours is
+	// avoided via booking_banked.
+	if _, err := q.Exec(ctx, `
+		INSERT INTO reported_override (user_id, hours) VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET hours = reported_override.hours + $2
+	`, userID, addedHours); err != nil {
+		return 0, err
+	}
+	if timer.BookingID != "" {
+		if _, err := q.Exec(ctx, `
+			INSERT INTO booking_banked (booking_id, hours) VALUES ($1, $2)
+			ON CONFLICT (booking_id) DO UPDATE SET hours = booking_banked.hours + $2
+		`, timer.BookingID, addedHours); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := q.Exec(ctx, `DELETE FROM timers WHERE user_id = $1`, userID); err != nil {
+		return 0, err
+	}
+	return addedHours, nil
+}
+
+func serializeBlock(ctx context.Context, q dbtx, block Block, currentUserID string) (BlockResponse, error) {
+	blockBookings, err := getBlockBookings(ctx, q, block.ID)
+	if err != nil {
+		return BlockResponse{}, err
+	}
 	reservedHours := 0
 	myHours := 0
 	bookingsResp := make([]BookingStatus, 0, len(blockBookings))
@@ -459,22 +507,74 @@ func serializeBlock(block Block, currentUserID string) BlockResponse {
 		IsFull:         remainingHours <= 0,
 		MyHours:        myHours,
 		Bookings:       bookingsResp,
-	}
+	}, nil
 }
 
-func summarizeDate(dateKey string) Summary {
-	blocks := store.releaseBlocks[dateKey]
+// releaseBlocksForDate returns every release block on a date — a pure read,
+// used by read-only aggregation paths (no FOR UPDATE; getBlockByID below is
+// the locking variant used by check-then-write handlers).
+func releaseBlocksForDate(ctx context.Context, q dbtx, dateKey string) ([]Block, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, date_key, start_slot, total_hours, block_size, shift_name, start_time, end_time, work_type, owner_id, max_hours_per_user
+		FROM release_blocks WHERE date_key = $1
+	`, dateKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	blocks := make([]Block, 0)
+	for rows.Next() {
+		var b Block
+		if err := rows.Scan(&b.ID, &b.DateKey, &b.StartSlot, &b.TotalHours, &b.BlockSize, &b.ShiftName, &b.StartTime, &b.EndTime, &b.WorkType, &b.OwnerID, &b.MaxHoursPerUser); err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, b)
+	}
+	return blocks, rows.Err()
+}
+
+// getBlockByID looks up a single block and locks its row FOR UPDATE — every
+// caller uses this from inside a transaction that's about to validate a
+// claim against the block's capacity and then write, so the lock matters.
+func getBlockByID(ctx context.Context, q dbtx, dateKey, blockID string) (Block, bool, error) {
+	var b Block
+	err := q.QueryRow(ctx, `
+		SELECT id, date_key, start_slot, total_hours, block_size, shift_name, start_time, end_time, work_type, owner_id, max_hours_per_user
+		FROM release_blocks WHERE date_key = $1 AND id = $2 FOR UPDATE
+	`, dateKey, blockID).Scan(&b.ID, &b.DateKey, &b.StartSlot, &b.TotalHours, &b.BlockSize, &b.ShiftName, &b.StartTime, &b.EndTime, &b.WorkType, &b.OwnerID, &b.MaxHoursPerUser)
+	if err == pgx.ErrNoRows {
+		return Block{}, false, nil
+	}
+	if err != nil {
+		return Block{}, false, err
+	}
+	return b, true, nil
+}
+
+func summarizeDateForOwner(ctx context.Context, q dbtx, dateKey, ownerID string) (Summary, error) {
+	blocks, err := releaseBlocksForDate(ctx, q, dateKey)
+	if err != nil {
+		return Summary{}, err
+	}
 	releasedHours := 0
 	reservedHours := 0
 	for _, block := range blocks {
+		// When ownerID is provided, only count this admin's own blocks.
+		if ownerID != "" && block.OwnerID != ownerID {
+			continue
+		}
 		releasedHours += block.TotalHours
-		reservedHours += reservedForBlock(block.ID)
+		reserved, err := reservedForBlock(ctx, q, block.ID)
+		if err != nil {
+			return Summary{}, err
+		}
+		reservedHours += reserved
 	}
 	return Summary{
 		ReleasedHours:  releasedHours,
 		ReservedHours:  reservedHours,
 		RemainingHours: int(math.Max(0, float64(releasedHours-reservedHours))),
-	}
+	}, nil
 }
 
 func handleWeekRange(w http.ResponseWriter, r *http.Request) {
@@ -504,32 +604,50 @@ func handleWeekSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := r.Context()
 	response := map[string]struct {
 		Blocks  []BlockResponse `json:"blocks"`
 		Summary Summary         `json:"summary"`
 	}{}
 
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
 	allowedWorkTypes := map[string]struct{}{}
 	if account.Role != "admin" {
-		for _, wt := range resolveGrantedWorkTypesForEmail(account.Email, account.DefaultWorkTypes) {
+		granted, err := resolveGrantedWorkTypesForEmail(ctx, db, account.Email, account.DefaultWorkTypes)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		for _, wt := range granted {
 			allowedWorkTypes[wt] = struct{}{}
 		}
 	}
 
 	for _, dateKey := range payload.DateKeys {
+		dateBlocks, err := releaseBlocksForDate(ctx, db, dateKey)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
 		blocks := make([]BlockResponse, 0)
-		for _, block := range store.releaseBlocks[dateKey] {
+		for _, block := range dateBlocks {
 			if account.Role == "admin" {
 				if block.OwnerID == account.ID {
-					blocks = append(blocks, serializeBlock(block, account.ID))
+					sb, err := serializeBlock(ctx, db, block, account.ID)
+					if err != nil {
+						writeInternalError(w, err)
+						return
+					}
+					blocks = append(blocks, sb)
 				}
 				continue
 			}
 			if _, ok := allowedWorkTypes[block.WorkType]; ok {
-				blocks = append(blocks, serializeBlock(block, account.ID))
+				sb, err := serializeBlock(ctx, db, block, account.ID)
+				if err != nil {
+					writeInternalError(w, err)
+					return
+				}
+				blocks = append(blocks, sb)
 			}
 		}
 		releasedHours := 0
@@ -566,10 +684,11 @@ func handleUserHours(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
 		return
 	}
-	result := 0
-	store.mu.Lock()
-	result = userHoursForDayAndWorkType(dateKey, userID, workType, "")
-	store.mu.Unlock()
+	result, err := userHoursForDayAndWorkType(r.Context(), db, dateKey, userID, workType, "")
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -590,62 +709,56 @@ func handleUserHoursSummary(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
 		return
 	}
+	ctx := r.Context()
 	dateSet := make(map[string]struct{}, len(payload.DateKeys))
 	for _, k := range payload.DateKeys {
 		dateSet[k] = struct{}{}
 	}
+
+	rows, err := db.Query(ctx, `
+		SELECT b.hours, b.date_key, rb.start_time, rb.end_time, COALESCE(bb.hours, 0)
+		FROM bookings b
+		JOIN release_blocks rb ON rb.id = b.block_id
+		LEFT JOIN booking_banked bb ON bb.booking_id = b.id
+		WHERE b.user_id = $1
+	`, payload.UserID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer rows.Close()
+
 	reportedHours := 0.0
 	reservedHours := 0
-	store.mu.Lock()
-	for _, booking := range store.bookings {
-		if booking.UserID != payload.UserID {
+	for rows.Next() {
+		var dateKey, startTime, endTime string
+		var hours int
+		var banked float64
+		if err := rows.Scan(&hours, &dateKey, &startTime, &endTime, &banked); err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		if _, ok := dateSet[dateKey]; !ok {
 			continue
 		}
-		if _, ok := dateSet[booking.DateKey]; !ok {
-			continue
-		}
-		block := Block{}
-		for _, candidate := range store.releaseBlocks[booking.DateKey] {
-			if candidate.ID == booking.BlockID {
-				block = candidate
-				break
-			}
-		}
-		reservedHours += booking.Hours
-		if deriveShiftBookingStatus(booking.DateKey, block.StartTime, block.EndTime) == "completed" {
+		reservedHours += hours
+		if deriveShiftBookingStatus(dateKey, startTime, endTime) == "completed" {
 			// Subtract whatever's already been banked for this booking via
 			// stopped timers (handleStopTimer / handleGetTimer auto-stop) —
 			// that portion is already counted client-side through
-			// reportedOverride, so adding the full booking.Hours here too
+			// reportedOverride, so adding the full booking hours here too
 			// would double-count it.
-			alreadyBanked := store.bookingBanked[booking.ID]
-			remaining := float64(booking.Hours) - alreadyBanked
+			remaining := float64(hours) - banked
 			if remaining > 0 {
 				reportedHours += remaining
 			}
 		}
 	}
-	store.mu.Unlock()
+	if err := rows.Err(); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"reportedHours": reportedHours, "reservedHours": reservedHours})
-}
-
-func summarizeDateForOwner(dateKey, ownerID string) Summary {
-	blocks := store.releaseBlocks[dateKey]
-	releasedHours := 0
-	reservedHours := 0
-	for _, block := range blocks {
-		// When ownerID is provided, only count this admin's own blocks.
-		if ownerID != "" && block.OwnerID != ownerID {
-			continue
-		}
-		releasedHours += block.TotalHours
-		reservedHours += reservedForBlock(block.ID)
-	}
-	return Summary{
-		ReleasedHours:  releasedHours,
-		ReservedHours:  reservedHours,
-		RemainingHours: int(math.Max(0, float64(releasedHours-reservedHours))),
-	}
 }
 
 func handleAdminCapacitySummary(w http.ResponseWriter, r *http.Request) {
@@ -660,12 +773,16 @@ func handleAdminCapacitySummary(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
+	ctx := r.Context()
 	response := make(map[string]Summary)
-	store.mu.Lock()
 	for _, dateKey := range payload.DateKeys {
-		response[dateKey] = summarizeDateForOwner(dateKey, account.ID)
+		summary, err := summarizeDateForOwner(ctx, db, dateKey, account.ID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		response[dateKey] = summary
 	}
-	store.mu.Unlock()
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -695,45 +812,74 @@ func handleReleaseHours(w http.ResponseWriter, r *http.Request) {
 	if payload.BlockSize < 1 {
 		payload.BlockSize = 1
 	}
-	created := addRelease(payload.DateKey, payload.TotalHours, payload.BlockSize, payload.StartSlot, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, account.ID, payload.MaxHoursPerUser)
+	created, err := addRelease(r.Context(), payload.DateKey, payload.TotalHours, payload.BlockSize, payload.StartSlot, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, account.ID, payload.MaxHoursPerUser)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": created})
 }
 
-func addRelease(dateKey string, totalHours, blockSize, startSlot int, shiftName, startTime, endTime, workType, ownerId string, maxHoursPerUser int) []Block {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	current := store.releaseBlocks[dateKey]
+// addRelease creates a new release block, or — if one already exists on this
+// date for the same project/owner/shift window — tops up its hours instead
+// of stacking a duplicate. Without this, re-clicking "Release" (or a
+// recurring release whose pattern happens to land on a date that already
+// has a manual release) creates several skinny side-by-side blocks for what
+// the admin sees as "one release". Runs in its own transaction with the
+// matching row locked FOR UPDATE, since two concurrent releases landing on
+// the same existing block must not both read the same TotalHours and race.
+func addRelease(ctx context.Context, dateKey string, totalHours, blockSize, startSlot int, shiftName, startTime, endTime, workType, ownerId string, maxHoursPerUser int) ([]Block, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
 
-	// If a block already exists on this date for the same project, owner,
-	// and shift window, top up its hours instead of stacking a brand-new
-	// block alongside it. Without this, re-clicking "Release" (or a
-	// recurring release whose pattern happens to land on a date that
-	// already has a manual release) creates several skinny side-by-side
-	// blocks for what the admin sees as "one release" — they fight for the
-	// same column width and the labels overlap/truncate.
-	for i := range current {
-		existing := &current[i]
-		if existing.WorkType == workType && existing.OwnerID == ownerId &&
-			existing.StartTime == startTime && existing.EndTime == endTime {
-			existing.TotalHours += totalHours
-			existing.BlockSize = existing.TotalHours
-			// Only set/raise MaxHoursPerUser — don't silently lower it and
-			// risk orphaning or invalidating existing bookings.
-			if maxHoursPerUser > 0 {
-				if existing.MaxHoursPerUser == 0 || maxHoursPerUser > existing.MaxHoursPerUser {
-					existing.MaxHoursPerUser = maxHoursPerUser
-				}
-			}
-			store.releaseBlocks[dateKey] = current
-			return []Block{*existing}
+	rows, err := tx.Query(ctx, `
+		SELECT id, date_key, start_slot, total_hours, block_size, shift_name, start_time, end_time, work_type, owner_id, max_hours_per_user
+		FROM release_blocks
+		WHERE date_key = $1 AND work_type = $2 AND owner_id = $3 AND start_time = $4 AND end_time = $5
+		FOR UPDATE`, dateKey, workType, ownerId, startTime, endTime)
+	if err != nil {
+		return nil, err
+	}
+	var existing *Block
+	if rows.Next() {
+		var b Block
+		if err := rows.Scan(&b.ID, &b.DateKey, &b.StartSlot, &b.TotalHours, &b.BlockSize, &b.ShiftName, &b.StartTime, &b.EndTime, &b.WorkType, &b.OwnerID, &b.MaxHoursPerUser); err != nil {
+			rows.Close()
+			return nil, err
 		}
+		existing = &b
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if existing != nil {
+		newTotal := existing.TotalHours + totalHours
+		newMax := existing.MaxHoursPerUser
+		// Only set/raise MaxHoursPerUser — don't silently lower it and risk
+		// orphaning or invalidating existing bookings.
+		if maxHoursPerUser > 0 && (newMax == 0 || maxHoursPerUser > newMax) {
+			newMax = maxHoursPerUser
+		}
+		if _, err := tx.Exec(ctx, `UPDATE release_blocks SET total_hours = $1, block_size = $1, max_hours_per_user = $2 WHERE id = $3`, newTotal, newMax, existing.ID); err != nil {
+			return nil, err
+		}
+		existing.TotalHours = newTotal
+		existing.BlockSize = newTotal
+		existing.MaxHoursPerUser = newMax
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return []Block{*existing}, nil
 	}
 
 	blocks := buildBlocks(totalHours, blockSize, startSlot)
 	created := make([]Block, 0, len(blocks))
 	for _, block := range blocks {
-		store.nextBlockID++
-		block.ID = fmt.Sprintf("rb-%d", store.nextBlockID)
 		block.DateKey = dateKey
 		block.ShiftName = shiftName
 		block.StartTime = startTime
@@ -743,10 +889,21 @@ func addRelease(dateKey string, totalHours, blockSize, startSlot int, shiftName,
 		if maxHoursPerUser > 0 {
 			block.MaxHoursPerUser = maxHoursPerUser
 		}
+		err := tx.QueryRow(ctx, `
+			INSERT INTO release_blocks (date_key, start_slot, total_hours, block_size, shift_name, start_time, end_time, work_type, owner_id, max_hours_per_user)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			RETURNING id`,
+			block.DateKey, block.StartSlot, block.TotalHours, block.BlockSize, block.ShiftName, block.StartTime, block.EndTime, block.WorkType, block.OwnerID, block.MaxHoursPerUser,
+		).Scan(&block.ID)
+		if err != nil {
+			return nil, err
+		}
 		created = append(created, block)
 	}
-	store.releaseBlocks[dateKey] = append(current, created...)
-	return created
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return created, nil
 }
 
 // recurringDateKeys computes the list of work-day dateKeys (YYYY-MM-DD) a
@@ -869,6 +1026,7 @@ func handleReleaseHoursRecurring(w http.ResponseWriter, r *http.Request) {
 	baseHoursPerDate := payload.TotalHours / occurrences
 	remainder := payload.TotalHours % occurrences
 
+	ctx := r.Context()
 	createdByDate := make(map[string][]Block, len(dateKeys))
 	totalBlocksCreated := 0
 	for i, dateKey := range dateKeys {
@@ -876,7 +1034,11 @@ func handleReleaseHoursRecurring(w http.ResponseWriter, r *http.Request) {
 		if i < remainder {
 			hoursForDate++
 		}
-		created := addRelease(dateKey, hoursForDate, hoursForDate, 0, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, account.ID, payload.MaxHoursPerUser)
+		created, err := addRelease(ctx, dateKey, hoursForDate, hoursForDate, 0, payload.ShiftName, payload.StartTime, payload.EndTime, payload.WorkType, account.ID, payload.MaxHoursPerUser)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
 		createdByDate[dateKey] = created
 		totalBlocksCreated += len(created)
 	}
@@ -910,101 +1072,148 @@ func handleAdjustReleasedHours(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	current := store.releaseBlocks[payload.DateKey]
-	var updatedBlock *Block
-	reserved := 0
-	for i, block := range current {
-		if block.ID != payload.BlockID {
-			continue
-		}
-		if block.OwnerID != account.ID {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
-			return
-		}
-		reserved = reservedForBlock(block.ID)
-		normalizedTotal := payload.TotalHours
-		if normalizedTotal < 1 {
-			normalizedTotal = 1
-		}
-		if normalizedTotal < reserved {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't reduce below %dh — that's already claimed on this block.", reserved)})
-			return
-		}
-		// Bug fix: changing a block's workType after users have already
-		// claimed hours on it silently orphans their bookings —
-		// handleWeekSchedule filters blocks by the project(s) a user has
-		// been granted, so a claimant without access to the NEW workType
-		// would stop seeing a block they still have hours reserved on,
-		// while those hours still count against their day in
-		// handleUserHoursSummary. Reassigning the project is only safe
-		// once nobody has claimed anything from this block yet.
-		trimmedWorkType := strings.TrimSpace(payload.WorkType)
-		if trimmedWorkType != "" && trimmedWorkType != block.WorkType && reserved > 0 {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't change the project — %dh are already claimed on this block under %q.", reserved, block.WorkType)})
-			return
-		}
-		originalStartTime, originalEndTime := block.StartTime, block.EndTime
-		current[i].TotalHours = normalizedTotal
-		current[i].BlockSize = normalizedTotal
-		if payload.ShiftName != "" {
-			current[i].ShiftName = payload.ShiftName
-		}
-		if payload.StartTime != "" {
-			current[i].StartTime = payload.StartTime
-		}
-		if payload.EndTime != "" {
-			current[i].EndTime = payload.EndTime
-		}
-		if payload.WorkType != "" {
-			current[i].WorkType = payload.WorkType
-		}
-		// A worker who already claimed hours on this block has no other way
-		// to learn their shift window moved — everything else this handler
-		// can change is already guarded against affecting an existing claim
-		// (total can't drop below reserved, workType can't change once
-		// claimed), so a start/end time change is the one case that
-		// legitimately needs to reach them.
-		timeChanged := (current[i].StartTime != originalStartTime) || (current[i].EndTime != originalEndTime)
-		if timeChanged && reserved > 0 {
-			notified := map[string]bool{}
-			for _, b := range getBlockBookings(current[i].ID) {
-				if notified[b.UserID] {
-					continue
-				}
-				notified[b.UserID] = true
-				addNotification(b.UserID, "shift_time_changed", fmt.Sprintf(
-					"Your %s shift on %s was moved to %s–%s.",
-					current[i].WorkType, payload.DateKey, current[i].StartTime, current[i].EndTime,
-				))
-			}
-		}
-		if payload.MaxHoursPerUser > 0 {
-			// Ensure lowering the per-user cap doesn't invalidate existing
-			// reservations: compute per-user reserved hours on this block and
-			// reject the change if any user already exceeds the requested cap.
-			userSums := make(map[string]int)
-			for _, b := range getBlockBookings(current[i].ID) {
-				userSums[b.UserID] += b.Hours
-			}
-			for uid, sum := range userSums {
-				if sum > payload.MaxHoursPerUser {
-					writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't set maxHoursPerUser to %dh — user %s already has %dh reserved on this block.", payload.MaxHoursPerUser, uid, sum)})
-					return
-				}
-			}
-			current[i].MaxHoursPerUser = payload.MaxHoursPerUser
-		}
-		updatedBlock = &current[i]
-		break
+	ctx := r.Context()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	store.releaseBlocks[payload.DateKey] = current
-	if updatedBlock == nil {
+	defer tx.Rollback(ctx)
+
+	block, found, err := getBlockByID(ctx, tx, payload.DateKey, payload.BlockID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if !found {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Block not found."})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": updatedBlock})
+	if block.OwnerID != account.ID {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+		return
+	}
+
+	reserved, err := reservedForBlock(ctx, tx, block.ID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	normalizedTotal := payload.TotalHours
+	if normalizedTotal < 1 {
+		normalizedTotal = 1
+	}
+	if normalizedTotal < reserved {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't reduce below %dh — that's already claimed on this block.", reserved)})
+		return
+	}
+	// Bug fix: changing a block's workType after users have already claimed
+	// hours on it silently orphans their bookings — handleWeekSchedule
+	// filters blocks by the project(s) a user has been granted, so a
+	// claimant without access to the NEW workType would stop seeing a block
+	// they still have hours reserved on, while those hours still count
+	// against their day in handleUserHoursSummary. Reassigning the project
+	// is only safe once nobody has claimed anything from this block yet.
+	trimmedWorkType := strings.TrimSpace(payload.WorkType)
+	if trimmedWorkType != "" && trimmedWorkType != block.WorkType && reserved > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Can't change the project — %dh are already claimed on this block under %q.", reserved, block.WorkType)})
+		return
+	}
+
+	originalStartTime, originalEndTime := block.StartTime, block.EndTime
+	updated := block
+	updated.TotalHours = normalizedTotal
+	updated.BlockSize = normalizedTotal
+	if payload.ShiftName != "" {
+		updated.ShiftName = payload.ShiftName
+	}
+	if payload.StartTime != "" {
+		updated.StartTime = payload.StartTime
+	}
+	if payload.EndTime != "" {
+		updated.EndTime = payload.EndTime
+	}
+	if payload.WorkType != "" {
+		updated.WorkType = payload.WorkType
+	}
+
+	if payload.MaxHoursPerUser > 0 {
+		// Ensure lowering the per-user cap doesn't invalidate existing
+		// reservations: compute per-user reserved hours on this block and
+		// reject the change if any user already exceeds the requested cap.
+		rows, err := tx.Query(ctx, `SELECT user_id, SUM(hours) FROM bookings WHERE block_id = $1 GROUP BY user_id`, block.ID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		var capError string
+		for rows.Next() {
+			var uid string
+			var sum int
+			if err := rows.Scan(&uid, &sum); err != nil {
+				rows.Close()
+				writeInternalError(w, err)
+				return
+			}
+			if sum > payload.MaxHoursPerUser {
+				capError = fmt.Sprintf("Can't set maxHoursPerUser to %dh — user %s already has %dh reserved on this block.", payload.MaxHoursPerUser, uid, sum)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		if capError != "" {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": capError})
+			return
+		}
+		updated.MaxHoursPerUser = payload.MaxHoursPerUser
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE release_blocks SET total_hours=$1, block_size=$2, shift_name=$3, start_time=$4, end_time=$5, work_type=$6, max_hours_per_user=$7
+		WHERE id = $8`,
+		updated.TotalHours, updated.BlockSize, updated.ShiftName, updated.StartTime, updated.EndTime, updated.WorkType, updated.MaxHoursPerUser, updated.ID,
+	); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+
+	// A worker who already claimed hours on this block has no other way to
+	// learn their shift window moved — everything else this handler can
+	// change is already guarded against affecting an existing claim (total
+	// can't drop below reserved, workType can't change once claimed), so a
+	// start/end time change is the one case that legitimately needs to
+	// reach them.
+	timeChanged := (updated.StartTime != originalStartTime) || (updated.EndTime != originalEndTime)
+	if timeChanged && reserved > 0 {
+		bookings, err := getBlockBookings(ctx, tx, updated.ID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		notified := map[string]bool{}
+		for _, b := range bookings {
+			if notified[b.UserID] {
+				continue
+			}
+			notified[b.UserID] = true
+			if err := addNotification(ctx, tx, b.UserID, "shift_time_changed", fmt.Sprintf(
+				"Your %s shift on %s was moved to %s–%s.",
+				updated.WorkType, payload.DateKey, updated.StartTime, updated.EndTime,
+			)); err != nil {
+				writeInternalError(w, err)
+				return
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": updated})
 }
 
 func handleRevokeBlock(w http.ResponseWriter, r *http.Request) {
@@ -1020,36 +1229,44 @@ func handleRevokeBlock(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	current := store.releaseBlocks[payload.DateKey]
-	var target *Block
-	for _, block := range current {
-		if block.ID == payload.BlockID {
-			target = &block
-			break
-		}
+	ctx := r.Context()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	if target == nil {
+	defer tx.Rollback(ctx)
+
+	block, found, err := getBlockByID(ctx, tx, payload.DateKey, payload.BlockID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if !found {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Block not found."})
 		return
 	}
-	if target.OwnerID != account.ID {
+	if block.OwnerID != account.ID {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
 		return
 	}
-	if reservedForBlock(payload.BlockID) > 0 {
+	reserved, err := reservedForBlock(ctx, tx, payload.BlockID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if reserved > 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "This block already has reservations."})
 		return
 	}
-	next := make([]Block, 0, len(current))
-	for _, block := range current {
-		if block.ID == payload.BlockID {
-			continue
-		}
-		next = append(next, block)
+	if _, err := tx.Exec(ctx, `DELETE FROM release_blocks WHERE id = $1`, payload.BlockID); err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	store.releaseBlocks[payload.DateKey] = next
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -1073,21 +1290,29 @@ func handleReserveHours(w http.ResponseWriter, r *http.Request) {
 	if payload.Hours < 1 {
 		payload.Hours = 1
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	block := Block{}
-	for _, candidate := range store.releaseBlocks[payload.DateKey] {
-		if candidate.ID == payload.BlockID {
-			block = candidate
-			break
-		}
+	ctx := r.Context()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	if block.ID == "" {
+	defer tx.Rollback(ctx)
+
+	block, found, err := getBlockByID(ctx, tx, payload.DateKey, payload.BlockID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if !found {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Block not found."})
 		return
 	}
 	if account.Role != "admin" {
-		allowedWorkTypes := resolveGrantedWorkTypesForEmail(account.Email, account.DefaultWorkTypes)
+		allowedWorkTypes, err := resolveGrantedWorkTypesForEmail(ctx, tx, account.Email, account.DefaultWorkTypes)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
 		allowed := false
 		for _, wt := range allowedWorkTypes {
 			if wt == block.WorkType {
@@ -1109,7 +1334,11 @@ func handleReserveHours(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "This shift has already ended and can no longer be claimed."})
 		return
 	}
-	remainingHours := remainingForBlock(block)
+	remainingHours, err := remainingForBlock(ctx, tx, block)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	if payload.Hours > remainingHours {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("Only %dh remain in this block.", remainingHours)})
 		return
@@ -1122,20 +1351,33 @@ func handleReserveHours(w http.ResponseWriter, r *http.Request) {
 	if block.MaxHoursPerUser > 0 {
 		perUserMax = block.MaxHoursPerUser
 	}
-	existingForUser := userHoursForDayAndWorkType(payload.DateKey, payload.UserID, block.WorkType, "")
+	existingForUser, err := userHoursForDayAndWorkType(ctx, tx, payload.DateKey, payload.UserID, block.WorkType, "")
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	if existingForUser+payload.Hours > perUserMax {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("That would put you at %dh of %s today; the max is %dh/day per project.", existingForUser+payload.Hours, block.WorkType, perUserMax)})
 		return
 	}
-	store.nextBookingID++
+
 	created := Booking{
-		ID:      fmt.Sprintf("b-%d", store.nextBookingID),
 		UserID:  payload.UserID,
 		DateKey: payload.DateKey,
 		BlockID: payload.BlockID,
 		Hours:   payload.Hours,
 	}
-	store.bookings = append(store.bookings, created)
+	err = tx.QueryRow(ctx, `INSERT INTO bookings (user_id, date_key, block_id, hours) VALUES ($1, $2, $3, $4) RETURNING id`,
+		created.UserID, created.DateKey, created.BlockID, created.Hours,
+	).Scan(&created.ID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": created})
 }
 
@@ -1155,17 +1397,23 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload.UserID = account.ID
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	var target *Booking
-	for i := range store.bookings {
-		if store.bookings[i].ID == payload.BookingID {
-			target = &store.bookings[i]
-			break
-		}
+	ctx := r.Context()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	if target == nil {
+	defer tx.Rollback(ctx)
+
+	var target Booking
+	err = tx.QueryRow(ctx, `SELECT id, user_id, date_key, block_id, hours FROM bookings WHERE id = $1 FOR UPDATE`, payload.BookingID).
+		Scan(&target.ID, &target.UserID, &target.DateKey, &target.BlockID, &target.Hours)
+	if err == pgx.ErrNoRows {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Booking not found."})
+		return
+	}
+	if err != nil {
+		writeInternalError(w, err)
 		return
 	}
 	if target.UserID != payload.UserID {
@@ -1176,14 +1424,29 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Hours must be 0 or more."})
 		return
 	}
-	if activeTimer, ok := store.timers[payload.UserID]; ok && activeTimer.BookingID == payload.BookingID {
+
+	var activeTimerBookingID string
+	err = tx.QueryRow(ctx, `SELECT booking_id FROM timers WHERE user_id = $1`, payload.UserID).Scan(&activeTimerBookingID)
+	if err != nil && err != pgx.ErrNoRows {
+		writeInternalError(w, err)
+		return
+	}
+	if activeTimerBookingID == payload.BookingID {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Stop the timer before changing or cancelling this reservation."})
 		return
 	}
-	if worked := store.bookingBanked[payload.BookingID]; worked > 0 && float64(payload.Hours) < worked {
+
+	var worked float64
+	err = tx.QueryRow(ctx, `SELECT hours FROM booking_banked WHERE booking_id = $1`, payload.BookingID).Scan(&worked)
+	if err != nil && err != pgx.ErrNoRows {
+		writeInternalError(w, err)
+		return
+	}
+	if worked > 0 && float64(payload.Hours) < worked {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("You've already worked %.2fh on this block — it can't be reduced below that.", worked)})
 		return
 	}
+
 	// Bug fix: this handler is also how the frontend cancels a reservation
 	// (by setting Hours to 0) — but unlike handleCancelBooking, it never
 	// checked whether the shift's time window had already passed. That let
@@ -1193,37 +1456,39 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 	// and apply the same "shift already happened" rule to every change this
 	// endpoint makes, not just the ones that happen to route through
 	// /cancel-booking.
-	block := Block{}
-	for _, candidate := range store.releaseBlocks[target.DateKey] {
-		if candidate.ID == target.BlockID {
-			block = candidate
-			break
-		}
+	block, _, err := getBlockByID(ctx, tx, target.DateKey, target.BlockID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
 	if payload.Hours != target.Hours && deriveShiftBookingStatus(target.DateKey, block.StartTime, block.EndTime) == "completed" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Can't change a reservation for a shift that already happened."})
 		return
 	}
+
 	if payload.Hours == 0 {
-		original := *target
-		next := make([]Booking, 0, len(store.bookings)-1)
-		for _, booking := range store.bookings {
-			if booking.ID == payload.BookingID {
-				continue
-			}
-			next = append(next, booking)
+		if _, err := tx.Exec(ctx, `DELETE FROM bookings WHERE id = $1`, payload.BookingID); err != nil {
+			writeInternalError(w, err)
+			return
 		}
-		store.bookings = next
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true, "booking": original})
+		if err := tx.Commit(ctx); err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true, "booking": target})
 		return
 	}
-	otherBookingsOnBlock := 0
-	for _, booking := range store.bookings {
-		if booking.DateKey == target.DateKey && booking.BlockID == target.BlockID && booking.ID != payload.BookingID {
-			otherBookingsOnBlock += booking.Hours
-		}
+
+	var otherBookingsOnBlock int
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(hours),0) FROM bookings WHERE date_key=$1 AND block_id=$2 AND id != $3`, target.DateKey, target.BlockID, payload.BookingID).Scan(&otherBookingsOnBlock); err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	otherUserHours := userHoursForDayAndWorkType(target.DateKey, payload.UserID, block.WorkType, payload.BookingID)
+	otherUserHours, err := userHoursForDayAndWorkType(ctx, tx, target.DateKey, payload.UserID, block.WorkType, payload.BookingID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	// respect block-level per-user max if present, otherwise fall back to
 	// the server-side default — payload.MaxHoursPerDay is client-supplied
 	// and must never be trusted as the cap itself.
@@ -1242,12 +1507,23 @@ func handleUpdateBookingHours(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if payload.Hours == target.Hours {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": false, "booking": *target})
+		if err := tx.Commit(ctx); err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": false, "booking": target})
 		return
 	}
 	target.Hours = payload.Hours
-	updated := *target
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": true, "booking": updated})
+	if _, err := tx.Exec(ctx, `UPDATE bookings SET hours = $1 WHERE id = $2`, target.Hours, target.ID); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": true, "booking": target})
 }
 
 func handleCancelBooking(w http.ResponseWriter, r *http.Request) {
@@ -1264,44 +1540,66 @@ func handleCancelBooking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload.UserID = account.ID
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	idx := -1
-	for i, booking := range store.bookings {
-		if booking.ID == payload.BookingID {
-			idx = i
-			break
-		}
+	ctx := r.Context()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	if idx == -1 {
+	defer tx.Rollback(ctx)
+
+	var target Booking
+	err = tx.QueryRow(ctx, `SELECT id, user_id, date_key, block_id, hours FROM bookings WHERE id = $1 FOR UPDATE`, payload.BookingID).
+		Scan(&target.ID, &target.UserID, &target.DateKey, &target.BlockID, &target.Hours)
+	if err == pgx.ErrNoRows {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Booking not found."})
 		return
 	}
-	target := store.bookings[idx]
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	if target.UserID != payload.UserID {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Not your booking."})
 		return
 	}
-	if activeTimer, ok := store.timers[payload.UserID]; ok && activeTimer.BookingID == payload.BookingID {
+	var activeTimerBookingID string
+	err = tx.QueryRow(ctx, `SELECT booking_id FROM timers WHERE user_id = $1`, payload.UserID).Scan(&activeTimerBookingID)
+	if err != nil && err != pgx.ErrNoRows {
+		writeInternalError(w, err)
+		return
+	}
+	if activeTimerBookingID == payload.BookingID {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Stop the timer before changing or cancelling this reservation."})
 		return
 	}
-	if worked := store.bookingBanked[payload.BookingID]; worked > 0 {
+	var worked float64
+	err = tx.QueryRow(ctx, `SELECT hours FROM booking_banked WHERE booking_id = $1`, payload.BookingID).Scan(&worked)
+	if err != nil && err != pgx.ErrNoRows {
+		writeInternalError(w, err)
+		return
+	}
+	if worked > 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("You've already worked %.2fh on this block — it can't be cancelled.", worked)})
 		return
 	}
-	block := Block{}
-	for _, candidate := range store.releaseBlocks[target.DateKey] {
-		if candidate.ID == target.BlockID {
-			block = candidate
-			break
-		}
+	block, _, err := getBlockByID(ctx, tx, target.DateKey, target.BlockID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
 	if deriveShiftBookingStatus(target.DateKey, block.StartTime, block.EndTime) == "completed" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Can't cancel a shift that already happened."})
 		return
 	}
-	store.bookings = append(store.bookings[:idx], store.bookings[idx+1:]...)
+	if _, err := tx.Exec(ctx, `DELETE FROM bookings WHERE id = $1`, payload.BookingID); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -1311,12 +1609,24 @@ func handleGetProjects(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	adminId := account.ID
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	projects := store.projects[adminId]
-	if projects == nil {
-		projects = []string{}
+	rows, err := db.Query(r.Context(), `SELECT name FROM projects WHERE admin_id = $1 ORDER BY id`, account.ID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer rows.Close()
+	projects := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		projects = append(projects, name)
+	}
+	if err := rows.Err(); err != nil {
+		writeInternalError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, projects)
 }
@@ -1339,22 +1649,53 @@ func handleAddProject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name required"})
 		return
 	}
-	adminId := account.ID
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	ctx := r.Context()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
 	// Check if project already exists for this admin. Compared
 	// case-insensitively so "hubdoc" and "Hubdoc" are treated as the same
 	// project rather than silently creating a duplicate; the existing entry's
 	// original casing is kept since blocks already reference that string.
-	projects := store.projects[adminId]
+	rows, err := tx.Query(ctx, `SELECT name FROM projects WHERE admin_id = $1 ORDER BY id FOR UPDATE`, account.ID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	projects := []string{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			writeInternalError(w, err)
+			return
+		}
+		projects = append(projects, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	for _, p := range projects {
 		if strings.EqualFold(p, name) {
 			writeJSON(w, http.StatusOK, projects)
 			return
 		}
 	}
-	store.projects[adminId] = append(projects, name)
-	writeJSON(w, http.StatusOK, store.projects[adminId])
+	if _, err := tx.Exec(ctx, `INSERT INTO projects (admin_id, name) VALUES ($1, $2)`, account.ID, name); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, append(projects, name))
 }
 
 // handleProjectsRouter dispatches /api/projects: GET lists an admin's
@@ -1375,6 +1716,23 @@ func handleProjectsRouter(w http.ResponseWriter, r *http.Request) {
 // Mirrors AuthContext.jsx's workTypeAccess: { workType: [emails...] }.
 // ---------------------------------------------------------------------------
 
+func getWorkTypeAccessMap(ctx context.Context, q dbtx) (map[string][]string, error) {
+	rows, err := q.Query(ctx, `SELECT work_type, email FROM work_type_access ORDER BY work_type, email`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]string)
+	for rows.Next() {
+		var wt, email string
+		if err := rows.Scan(&wt, &email); err != nil {
+			return nil, err
+		}
+		out[wt] = append(out[wt], email)
+	}
+	return out, rows.Err()
+}
+
 // GET /api/work-type-access returns the full grant map. Every account (not
 // just admins) needs this: non-admin users read it client-side to compute
 // their own granted work types (see BoardPage.jsx's grantedWorkTypes), so
@@ -1385,36 +1743,31 @@ func handleGetWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	out := make(map[string][]string, len(store.workTypeAccess))
-	for k, v := range store.workTypeAccess {
-		out[k] = append([]string{}, v...)
+	out, err := getWorkTypeAccessMap(r.Context(), db)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 // findWorkTypeKey returns the existing key matching workType case-insensitively,
-// or "" if no such key exists yet. Callers must hold store.mu.
-func findWorkTypeKey(workType string) string {
-	for key := range store.workTypeAccess {
-		if strings.EqualFold(key, workType) {
-			return key
-		}
+// or "" if no such key exists yet.
+func findWorkTypeKey(ctx context.Context, q dbtx, workType string) (string, error) {
+	var key string
+	err := q.QueryRow(ctx, `SELECT work_type FROM work_type_access WHERE lower(work_type) = lower($1) LIMIT 1`, workType).Scan(&key)
+	if err == pgx.ErrNoRows {
+		return "", nil
 	}
-	return ""
+	return key, err
 }
 
 // adminOwnsProject reports whether the given admin has added workType to
-// their own project list (store.projects[adminID]), case-insensitively.
-// Callers must hold store.mu.
-func adminOwnsProject(adminID, workType string) bool {
-	for _, p := range store.projects[adminID] {
-		if strings.EqualFold(p, workType) {
-			return true
-		}
-	}
-	return false
+// their own project list, case-insensitively.
+func adminOwnsProject(ctx context.Context, q dbtx, adminID, workType string) (bool, error) {
+	var exists bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM projects WHERE admin_id = $1 AND lower(name) = lower($2))`, adminID, workType).Scan(&exists)
+	return exists, err
 }
 
 // POST /api/work-type-access/grant { email, workType }
@@ -1437,30 +1790,32 @@ func handleGrantWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "email and workType required"})
 		return
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if !adminOwnsProject(account.ID, workType) {
+	ctx := r.Context()
+	owns, err := adminOwnsProject(ctx, db, account.ID, workType)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if !owns {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
 		return
 	}
-	key := findWorkTypeKey(workType)
+	key, err := findWorkTypeKey(ctx, db, workType)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	if key == "" {
 		key = workType
 	}
-	existing := store.workTypeAccess[key]
-	already := false
-	for _, e := range existing {
-		if e == email {
-			already = true
-			break
-		}
+	if _, err := db.Exec(ctx, `INSERT INTO work_type_access (work_type, email) VALUES ($1, $2) ON CONFLICT (work_type, email) DO NOTHING`, key, email); err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	if !already {
-		store.workTypeAccess[key] = append(existing, email)
-	}
-	out := make(map[string][]string, len(store.workTypeAccess))
-	for k, v := range store.workTypeAccess {
-		out[k] = append([]string{}, v...)
+	out, err := getWorkTypeAccessMap(ctx, db)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1481,26 +1836,31 @@ func handleRevokeWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 	}
 	email := normalizeEmail(req.Email)
 	workType := strings.TrimSpace(req.WorkType)
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if !adminOwnsProject(account.ID, workType) {
+	ctx := r.Context()
+	owns, err := adminOwnsProject(ctx, db, account.ID, workType)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if !owns {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
 		return
 	}
-	key := findWorkTypeKey(workType)
-	if key != "" {
-		existing := store.workTypeAccess[key]
-		next := make([]string, 0, len(existing))
-		for _, e := range existing {
-			if e != email {
-				next = append(next, e)
-			}
-		}
-		store.workTypeAccess[key] = next
+	key, err := findWorkTypeKey(ctx, db, workType)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	out := make(map[string][]string, len(store.workTypeAccess))
-	for k, v := range store.workTypeAccess {
-		out[k] = append([]string{}, v...)
+	if key != "" {
+		if _, err := db.Exec(ctx, `DELETE FROM work_type_access WHERE work_type = $1 AND email = $2`, key, email); err != nil {
+			writeInternalError(w, err)
+			return
+		}
+	}
+	out, err := getWorkTypeAccessMap(ctx, db)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1510,17 +1870,33 @@ func handleRevokeWorkTypeAccess(w http.ResponseWriter, r *http.Request) {
 // type above for why these are server-side rather than client-only toasts).
 // ---------------------------------------------------------------------------
 
+func fetchNotifications(ctx context.Context, q dbtx, userID string) ([]Notification, error) {
+	rows, err := q.Query(ctx, `SELECT id, kind, message, created_at, read FROM notifications WHERE user_id = $1 ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	list := []Notification{}
+	for rows.Next() {
+		var n Notification
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Message, &n.CreatedAt, &n.Read); err != nil {
+			return nil, err
+		}
+		list = append(list, n)
+	}
+	return list, rows.Err()
+}
+
 // GET /api/notifications — the caller's own notifications, newest first.
 func handleGetNotifications(w http.ResponseWriter, r *http.Request) {
 	account, ok := requireSessionAccount(w, r)
 	if !ok {
 		return
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	list := store.notifications[account.ID]
-	if list == nil {
-		list = []Notification{}
+	list, err := fetchNotifications(r.Context(), db, account.ID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, list)
 }
@@ -1541,16 +1917,21 @@ func handleMarkNotificationsRead(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	list := store.notifications[account.ID]
-	for i := range list {
-		if payload.All || list[i].ID == payload.ID {
-			list[i].Read = true
-		}
+	ctx := r.Context()
+	var err error
+	if payload.All {
+		_, err = db.Exec(ctx, `UPDATE notifications SET read = true WHERE user_id = $1`, account.ID)
+	} else {
+		_, err = db.Exec(ctx, `UPDATE notifications SET read = true WHERE user_id = $1 AND id = $2`, account.ID, payload.ID)
 	}
-	if list == nil {
-		list = []Notification{}
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	list, err := fetchNotifications(ctx, db, account.ID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, list)
 }
@@ -1561,6 +1942,22 @@ func handleMarkNotificationsRead(w http.ResponseWriter, r *http.Request) {
 // instead of relying on localStorage.
 // ---------------------------------------------------------------------------
 
+func getActiveTimer(ctx context.Context, q dbtx, userID string, forUpdate bool) (*Timer, error) {
+	query := `SELECT user_id, start_at, task_name, booking_id, block_id, date_key FROM timers WHERE user_id = $1`
+	if forUpdate {
+		query += " FOR UPDATE"
+	}
+	var t Timer
+	err := q.QueryRow(ctx, query, userID).Scan(&t.UserID, &t.StartAt, &t.TaskName, &t.BookingID, &t.BlockID, &t.DateKey)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 // GET /api/timer?userId=xxx returns the user's active timer, or null.
 // Also auto-stops (and banks) any timer that's been running implausibly
 // long, mirroring the client's previous stale-timer recovery logic.
@@ -1570,42 +1967,84 @@ func handleGetTimer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := account.ID
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	timer := store.timers[userID]
-	if timer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"timer": nil, "bankedHours": store.reportedOverride[userID], "bookingBanked": bookingBankedForUser(userID)})
+	ctx := r.Context()
+
+	timer, err := getActiveTimer(ctx, db, userID, false)
+	if err != nil {
+		writeInternalError(w, err)
 		return
 	}
+	if timer == nil {
+		bankedHours, err := getReportedOverride(ctx, db, userID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		booking, err := bookingBankedForUser(ctx, db, userID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"timer": nil, "bankedHours": bankedHours, "bookingBanked": booking})
+		return
+	}
+
 	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
 	if elapsedSeconds > maxPlausibleTimerHours*3600 {
-		addedHours := math.Round(maxPlausibleTimerHours*100) / 100
-		// Bank elapsed hours for every stopped/auto-stopped timer, including
-		// ones tied to a specific booking — partial work should be reported
-		// immediately rather than waiting for the whole shift to complete.
-		// To avoid double-counting once the shift's end time passes (see
-		// handleUserHoursSummary, which only adds a completed booking's
-		// REMAINING un-banked hours), track how much of this booking has
-		// already been banked.
-		store.reportedOverride[userID] += addedHours
-		if timer.BookingID != "" {
-			store.bookingBanked[timer.BookingID] += addedHours
+		tx, err := db.Begin(ctx)
+		if err != nil {
+			writeInternalError(w, err)
+			return
 		}
-		delete(store.timers, userID)
-		addNotification(userID, "timer_auto_stopped", fmt.Sprintf(
+		defer tx.Rollback(ctx)
+
+		addedHours, err := bankTimerSeconds(ctx, tx, userID, timer, maxPlausibleTimerHours*3600)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		if err := addNotification(ctx, tx, userID, "timer_auto_stopped", fmt.Sprintf(
 			"Your timer for %q was stopped automatically after running %dh unattended — %gh was reported.",
 			timer.TaskName, maxPlausibleTimerHours, addedHours,
-		))
+		)); err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		bankedHours, err := getReportedOverride(ctx, tx, userID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		booking, err := bookingBankedForUser(ctx, tx, userID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			writeInternalError(w, err)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"timer":          nil,
-			"bankedHours":    store.reportedOverride[userID],
-			"bookingBanked":  bookingBankedForUser(userID),
+			"bankedHours":    bankedHours,
+			"bookingBanked":  booking,
 			"autoStopped":    true,
 			"autoStoppedFor": addedHours,
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"timer": timer, "bankedHours": store.reportedOverride[userID], "bookingBanked": bookingBankedForUser(userID)})
+
+	bankedHours, err := getReportedOverride(ctx, db, userID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	booking, err := bookingBankedForUser(ctx, db, userID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"timer": timer, "bankedHours": bankedHours, "bookingBanked": booking})
 }
 
 func handleTimerRouter(w http.ResponseWriter, r *http.Request) {
@@ -1614,26 +2053,6 @@ func handleTimerRouter(w http.ResponseWriter, r *http.Request) {
 	} else {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method not allowed"})
 	}
-}
-
-// bankTimerSeconds banks `cappedSeconds` worth of elapsed work for `timer`
-// into reportedOverride (and bookingBanked, if the timer was tied to a
-// specific booking), removes it from store.timers, and returns the hours
-// added. Callers must hold store.mu and must have already computed/capped
-// the elapsed seconds themselves.
-func bankTimerSeconds(userID string, timer *Timer, cappedSeconds float64) float64 {
-	addedHours := math.Round((cappedSeconds/3600)*100) / 100
-	// Bank elapsed hours immediately, even for booking-tied timers — partial
-	// work should show up in reported hours right away rather than waiting
-	// for the whole shift to complete. See handleUserHoursSummary for how
-	// double-counting against the eventual completed-booking hours is
-	// avoided via store.bookingBanked.
-	store.reportedOverride[userID] += addedHours
-	if timer.BookingID != "" {
-		store.bookingBanked[timer.BookingID] += addedHours
-	}
-	delete(store.timers, userID)
-	return addedHours
 }
 
 // POST /api/timer/start { userId, taskName, bookingId, blockId, dateKey }
@@ -1654,19 +2073,33 @@ func handleStartTimer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.UserID = account.ID
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	ctx := r.Context()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer tx.Rollback(ctx)
 
-	// Bug fix: previously this just did `store.timers[req.UserID] = timer`,
-	// silently discarding any timer already running for this user — e.g. a
-	// second tab/device calling start without stopping the first one first.
-	// Bank whatever was already accumulated (same accounting handleStopTimer
-	// uses) before replacing it, so no worked time is ever lost.
+	// Bug fix: previously this just overwrote any timer already running for
+	// this user — e.g. a second tab/device calling start without stopping
+	// the first one first. Bank whatever was already accumulated (same
+	// accounting handleStopTimer uses) before replacing it, so no worked
+	// time is ever lost.
+	existing, err := getActiveTimer(ctx, tx, req.UserID, true)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	var previousTimerBanked *float64
-	if existing := store.timers[req.UserID]; existing != nil {
+	if existing != nil {
 		elapsedSeconds := float64(time.Now().UnixMilli()-existing.StartAt) / 1000
 		cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
-		added := bankTimerSeconds(req.UserID, existing, cappedSeconds)
+		added, err := bankTimerSeconds(ctx, tx, req.UserID, existing, cappedSeconds)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
 		previousTimerBanked = &added
 	}
 
@@ -1678,13 +2111,34 @@ func handleStartTimer(w http.ResponseWriter, r *http.Request) {
 		BlockID:   req.BlockID,
 		DateKey:   req.DateKey,
 	}
-	store.timers[req.UserID] = timer
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO timers (user_id, start_at, task_name, booking_id, block_id, date_key)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (user_id) DO UPDATE SET start_at=$2, task_name=$3, booking_id=$4, block_id=$5, date_key=$6
+	`, timer.UserID, timer.StartAt, timer.TaskName, timer.BookingID, timer.BlockID, timer.DateKey); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 
 	resp := map[string]any{"ok": true, "timer": timer}
 	if previousTimerBanked != nil {
+		bankedHours, err := getReportedOverride(ctx, tx, req.UserID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		booking, err := bookingBankedForUser(ctx, tx, req.UserID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
 		resp["previousTimerBanked"] = *previousTimerBanked
-		resp["bankedHours"] = store.reportedOverride[req.UserID]
-		resp["bookingBanked"] = bookingBankedForUser(req.UserID)
+		resp["bankedHours"] = bankedHours
+		resp["bookingBanked"] = booking
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1706,29 +2160,58 @@ func handleStopTimer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.UserID = account.ID
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	timer := store.timers[req.UserID]
-	if timer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "addedHours": 0.0, "bankedHours": store.reportedOverride[req.UserID], "bookingBanked": bookingBankedForUser(req.UserID)})
+	ctx := r.Context()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		writeInternalError(w, err)
 		return
 	}
-	elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
-	// If the client supplies an explicit elapsed-seconds snapshot (e.g. it
-	// went offline partway through and is now finalizing the stop), trust
-	// whichever is SMALLER — this lets a network outage be excluded from
-	// the reported time instead of silently banking the full wall-clock gap,
-	// while never letting a client-supplied value inflate the real elapsed.
-	if req.ClientElapsedSeconds != nil && *req.ClientElapsedSeconds >= 0 && *req.ClientElapsedSeconds < elapsedSeconds {
-		elapsedSeconds = *req.ClientElapsedSeconds
+	defer tx.Rollback(ctx)
+
+	timer, err := getActiveTimer(ctx, tx, req.UserID, true)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
-	cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
-	addedHours := bankTimerSeconds(req.UserID, timer, cappedSeconds)
+
+	var addedHours float64
+	if timer != nil {
+		elapsedSeconds := float64(time.Now().UnixMilli()-timer.StartAt) / 1000
+		// If the client supplies an explicit elapsed-seconds snapshot (e.g.
+		// it went offline partway through and is now finalizing the stop),
+		// trust whichever is SMALLER — this lets a network outage be
+		// excluded from the reported time instead of silently banking the
+		// full wall-clock gap, while never letting a client-supplied value
+		// inflate the real elapsed.
+		if req.ClientElapsedSeconds != nil && *req.ClientElapsedSeconds >= 0 && *req.ClientElapsedSeconds < elapsedSeconds {
+			elapsedSeconds = *req.ClientElapsedSeconds
+		}
+		cappedSeconds := math.Min(elapsedSeconds, maxPlausibleTimerHours*3600)
+		addedHours, err = bankTimerSeconds(ctx, tx, req.UserID, timer, cappedSeconds)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+	}
+	bankedHours, err := getReportedOverride(ctx, tx, req.UserID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	booking, err := bookingBankedForUser(ctx, tx, req.UserID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
 		"addedHours":    addedHours,
-		"bankedHours":   store.reportedOverride[req.UserID],
-		"bookingBanked": bookingBankedForUser(req.UserID),
+		"bankedHours":   bankedHours,
+		"bookingBanked": booking,
 	})
 }
 
@@ -1750,13 +2233,9 @@ type sessionAccount struct {
 	DefaultWorkTypes []string `json:"defaultWorkTypes"`
 }
 
-// activeSessions maps a sessionId -> account, so the frontend can hold a
-// random session token instead of caching the whole user object itself.
-var activeSessions = struct {
-	mu sync.Mutex
-	m  map[string]sessionAccount
-}{m: make(map[string]sessionAccount)}
-
+// getSessionAccount looks the session up by ID and joins straight through to
+// the user row — no snapshot is stored in the sessions table, so this always
+// reflects the account's current state, never a stale copy from login time.
 func getSessionAccount(r *http.Request) (*sessionAccount, bool) {
 	sessionID := r.Header.Get("X-Session-Id")
 	if sessionID == "" {
@@ -1765,10 +2244,13 @@ func getSessionAccount(r *http.Request) (*sessionAccount, bool) {
 	if sessionID == "" {
 		return nil, false
 	}
-	activeSessions.mu.Lock()
-	account, ok := activeSessions.m[sessionID]
-	activeSessions.mu.Unlock()
-	if !ok {
+	var account sessionAccount
+	err := db.QueryRow(r.Context(), `
+		SELECT u.id, u.name, u.email, u.avatar_url, u.role, u.default_work_types
+		FROM sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.id = $1
+	`, sessionID).Scan(&account.ID, &account.Name, &account.Email, &account.AvatarURL, &account.Role, &account.DefaultWorkTypes)
+	if err != nil {
 		return nil, false
 	}
 	return &account, true
@@ -1795,28 +2277,35 @@ func requireAdminAccount(w http.ResponseWriter, r *http.Request) (*sessionAccoun
 	return account, true
 }
 
-func resolveGrantedWorkTypesForEmail(email string, defaultWorkTypes []string) []string {
+func resolveGrantedWorkTypesForEmail(ctx context.Context, q dbtx, email string, defaultWorkTypes []string) ([]string, error) {
 	normalizedEmail := normalizeEmail(email)
 	granted := map[string]struct{}{}
 	for _, wt := range defaultWorkTypes {
 		granted[wt] = struct{}{}
 	}
-	for workType, emails := range store.workTypeAccess {
-		for _, e := range emails {
-			if e == normalizedEmail {
-				granted[workType] = struct{}{}
-				break
-			}
+	rows, err := q.Query(ctx, `SELECT work_type FROM work_type_access WHERE email = $1`, normalizedEmail)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var wt string
+		if err := rows.Scan(&wt); err != nil {
+			return nil, err
 		}
+		granted[wt] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	out := make([]string, 0, len(granted))
 	for wt := range granted {
 		out = append(out, wt)
 	}
-	return out
+	return out, nil
 }
 
-// POST /api/register creates a new user in memory.
+// POST /api/register creates a new user.
 func handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name       string `json:"name"`
@@ -1860,24 +2349,28 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	if _, exists := store.users[email]; exists {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "email already registered"})
-		return
-	}
-
+	ctx := r.Context()
 	user := User{
-		ID:               fmt.Sprintf("user-%d", store.nextUserID),
 		Name:             name,
 		Email:            email,
 		PasswordHash:     hashPassword(password),
 		Role:             role,
 		DefaultWorkTypes: []string{},
 	}
-	store.nextUserID++
-	store.users[email] = user
+	err := db.QueryRow(ctx, `
+		INSERT INTO users (name, email, password_hash, avatar_url, role, default_work_types)
+		VALUES ($1, $2, $3, '', $4, $5)
+		RETURNING id
+	`, user.Name, user.Email, user.PasswordHash, user.Role, user.DefaultWorkTypes).Scan(&user.ID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation on users.email
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "email already registered"})
+			return
+		}
+		writeInternalError(w, err)
+		return
+	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"user": map[string]any{
@@ -1911,10 +2404,15 @@ func handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store.mu.Lock()
-	user, exists := store.users[email]
-	store.mu.Unlock()
-	if !exists || !passwordMatches(user.PasswordHash, password) {
+	ctx := r.Context()
+	var user User
+	err := db.QueryRow(ctx, `SELECT id, name, email, password_hash, avatar_url, role, default_work_types FROM users WHERE email = $1`, email).
+		Scan(&user.ID, &user.Name, &user.Email, &user.PasswordHash, &user.AvatarURL, &user.Role, &user.DefaultWorkTypes)
+	if err != nil && err != pgx.ErrNoRows {
+		writeInternalError(w, err)
+		return
+	}
+	if err == pgx.ErrNoRows || !passwordMatches(user.PasswordHash, password) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid email or password"})
 		return
 	}
@@ -1929,13 +2427,16 @@ func handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := fmt.Sprintf("sess-%s-%d", account.ID, time.Now().UnixNano())
-	activeSessions.mu.Lock()
-	activeSessions.m[sessionID] = account
-	activeSessions.mu.Unlock()
+	if _, err := db.Exec(ctx, `INSERT INTO sessions (id, user_id) VALUES ($1, $2)`, sessionID, account.ID); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 
-	store.mu.Lock()
-	granted := resolveGrantedWorkTypesForEmail(account.Email, account.DefaultWorkTypes)
-	store.mu.Unlock()
+	granted, err := resolveGrantedWorkTypesForEmail(ctx, db, account.Email, account.DefaultWorkTypes)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sessionId": sessionID,
@@ -1953,17 +2454,16 @@ func handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/session?sessionId=xxx restores the session (e.g. on page reload).
 func handleSessionGet(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.URL.Query().Get("sessionId")
-	activeSessions.mu.Lock()
-	account, ok := activeSessions.m[sessionID]
-	activeSessions.mu.Unlock()
+	account, ok := getSessionAccount(r)
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{"user": nil})
 		return
 	}
-	store.mu.Lock()
-	granted := resolveGrantedWorkTypesForEmail(account.Email, account.DefaultWorkTypes)
-	store.mu.Unlock()
+	granted, err := resolveGrantedWorkTypesForEmail(r.Context(), db, account.Email, account.DefaultWorkTypes)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user": map[string]any{
 			"id":               account.ID,
@@ -1986,9 +2486,10 @@ func handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request"})
 		return
 	}
-	activeSessions.mu.Lock()
-	delete(activeSessions.m, req.SessionID)
-	activeSessions.mu.Unlock()
+	if _, err := db.Exec(r.Context(), `DELETE FROM sessions WHERE id = $1`, req.SessionID); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -2007,6 +2508,10 @@ func main() {
 	if envCode := strings.TrimSpace(os.Getenv("ADMIN_INVITE_CODE")); envCode != "" {
 		defaultAdminInviteCode = envCode
 	}
+
+	ctx := context.Background()
+	db = connectDB(ctx)
+	defer db.Close()
 
 	authRateLimiter := newRateLimiter(5, time.Minute)
 
